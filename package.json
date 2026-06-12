@@ -1,0 +1,14 @@
+{
+  "name": "the-field-scraper",
+  "version": "1.0.0",
+  "description": "Live scoring scraper for The Field Fantasy Golf",
+  "main": "scraper.js",
+  "scripts": {
+    "start": "node scraper.js",
+    "dev": "node scraper.js"
+  },
+  "dependencies": {
+    "node-fetch": "2.6.9",
+    "@supabase/supabase-js": "^2.0.0"
+  }
+}
