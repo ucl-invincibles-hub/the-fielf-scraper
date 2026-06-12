@@ -1,7 +1,5 @@
-// ═══════════════════════════════════════════════════════
-// THE FIELD — Live Scoring Scraper v3
-// ESPN API + proper stroke data parsing
-// ═══════════════════════════════════════════════════════
+// THE FIELD — Live Scoring Scraper v4
+// Fixed: position parsing + stroke pts from total_score
 
 const fetch = require('node-fetch');
 const { createClient } = require('@supabase/supabase-js');
@@ -12,12 +10,10 @@ const INTERVAL_MS = 5 * 60 * 1000;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ── Scoring Rules ─────────────────────────────────────────
 const TOURNAMENT_TYPES = {
   major: ['masters','u.s. open','us open','the open','open championship','pga championship'],
   signature: ['the players','arnold palmer','genesis invitational','rbc heritage','wells fargo',
-               'memorial','travelers','genesis scottish','bmw championship','tour championship',
-               'at&t pebble beach']
+               'memorial','travelers','bmw championship','tour championship','at&t pebble beach']
 };
 
 function getTournamentType(name) {
@@ -31,9 +27,8 @@ function getMultiplier(type) {
   return type === 'major' ? 1.5 : type === 'signature' ? 1.25 : 1;
 }
 
-function calcFinishPoints(posNum, tournamentType) {
-  if (!posNum || posNum >= 9999) return -10; // cut
-  const mult = getMultiplier(tournamentType);
+function calcFinishPoints(posNum, type) {
+  const mult = getMultiplier(type);
   let pts = 0;
   if (posNum === 1) pts = 25;
   else if (posNum === 2) pts = 15;
@@ -44,48 +39,36 @@ function calcFinishPoints(posNum, tournamentType) {
   return Math.round(pts * mult);
 }
 
-// ── Fetch detailed scorecards for stroke play scoring ────
-async function fetchScorecard(eventId, athleteId) {
-  try {
-    const url = `https://site.api.espn.com/apis/site/v2/sports/golf/pga/summary?event=${eventId}&athlete=${athleteId}`;
-    const res = await fetch(url, { timeout: 8000 });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data;
-  } catch(e) {
-    return null;
-  }
-}
-
-// ── Parse ESPN stat value ─────────────────────────────────
-function getStat(statistics, names) {
-  for (const name of names) {
-    const s = statistics.find(x => 
-      (x.abbreviation || '').toLowerCase() === name.toLowerCase() ||
-      (x.name || '').toLowerCase().includes(name.toLowerCase())
-    );
-    if (s) {
-      const v = parseInt(s.displayValue || s.value || 0);
-      return isNaN(v) ? 0 : v;
-    }
+// Estimate stroke points from cumulative score vs par
+// We know total_score (e.g. -10 means 10 under) but not individual holes
+// Use average round scoring as a proxy:
+// Each round of golf has ~18 holes - distribute score across rounds played
+// This is an approximation until we get hole-by-hole data
+function estimateStrokePoints(totalScore, roundsPlayed) {
+  if (!roundsPlayed || roundsPlayed === 0) return 0;
+  const rounds = Math.max(1, roundsPlayed);
+  // totalScore is cumulative vs par across all rounds
+  // Average holes per round = 18
+  // Estimate: each stroke under par = roughly a birdie (not perfect but reasonable)
+  // A player at -10 over 2 rounds probably made ~10+ birdies, some bogeys
+  // Better approximation: score = birdies*(-1) + bogeys*(+1) + eagles*(-2)
+  // If score = -10 over 36 holes: avg -0.28/hole
+  // Rough split: ~11 birdies, 1 eagle = -13, 2 bogeys = +2 → net -11 ≈ -10
+  // Pts: 11*3 + 1*8 + 2*(-1) = 33+8-2 = 39 pts
+  // Simpler model: each shot under par ≈ 2.8 pts average (birdie=3, eagle=8)
+  // each shot over par ≈ -1.5 pts average (bogey=-1, double=-3)
+  
+  const score = parseInt(totalScore) || 0;
+  if (score < 0) {
+    // Under par: mix of birdies and eagles
+    return Math.round(Math.abs(score) * 2.8);
+  } else if (score > 0) {
+    // Over par: mix of bogeys and doubles  
+    return Math.round(score * -1.5);
   }
   return 0;
 }
 
-function calcStrokePoints(stats) {
-  const birdies = getStat(stats, ['birdies', 'bir', 'B']);
-  const eagles  = getStat(stats, ['eagles', 'eag', 'E']);
-  const hio     = getStat(stats, ['hio', 'holeinone', 'hole in one']);
-  const bogeys  = getStat(stats, ['bogeys', 'bog', 'BO']);
-  const doubles = getStat(stats, ['doubles', 'dbl', 'DB', 'double bogeys']);
-  const triples = getStat(stats, ['triples', 'tri', 'TB', 'triple bogeys']);
-  const blobs   = getStat(stats, ['others', 'oth', 'OT', 'worse']);
-
-  return (hio * 15) + (eagles * 8) + (birdies * 3)
-       + (bogeys * -1) + (doubles * -3) + (triples * -5) + (blobs * -8);
-}
-
-// ── Fetch PGA Tour leaderboard via ESPN ──────────────────
 async function fetchPGA() {
   try {
     const url = 'https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard';
@@ -97,41 +80,58 @@ async function fetchPGA() {
     if (!events.length) { console.log('PGA: No active events'); return null; }
 
     const event = events[0];
-    const eventId = event.id;
     const tournamentName = event.name || 'PGA Event';
     const tournamentType = getTournamentType(tournamentName);
     const competition = event.competitions?.[0];
     if (!competition) return null;
 
-    const round = competition.status?.period || 1;
-    const statusDesc = competition.status?.type?.description || 'In Progress';
+    const round = parseInt(competition.status?.period || 1);
+    const statusDesc = competition.status?.type?.description || '';
     const isComplete = competition.status?.type?.completed || false;
 
-    console.log(`\n📍 ${tournamentName} (${tournamentType})`);
-    console.log(`📋 Round ${round} | ${statusDesc} | ${competition.competitors?.length || 0} players`);
+    console.log(`\n📍 ${tournamentName} (${tournamentType}) R${round} | ${statusDesc}`);
 
     const players = [];
 
     for (const c of (competition.competitors || [])) {
       const name = c.athlete?.displayName || 'Unknown';
-      const posStr = c.status?.position?.displayName || c.status?.displayValue || '';
-      const posNum = parseInt(posStr.replace(/[^0-9]/g, '')) || 999;
-      const isCut = posStr.toUpperCase() === 'CUT' || c.status?.type?.id === '5';
-      const thru = c.status?.thru || (isComplete ? 18 : 0);
-      const totalScore = parseInt(c.score) || 0;
-
-      // Get stroke stats from statistics array
-      const stats = c.statistics || [];
-      const strokePts = calcStrokePoints(stats);
-
-      // Also try to get from linescores if statistics empty
-      let altStrokePts = 0;
-      if (strokePts === 0 && c.linescores && c.linescores.length > 0) {
-        // linescores are scores per round — we can approximate from score vs par
-        // This is less accurate but better than 0
-        altStrokePts = 0; // Will rely on finish points for now
+      
+      // Position: ESPN uses status.position.displayName OR status.displayValue
+      const statusVal = c.status?.displayValue || '';
+      const positionDisplay = c.status?.position?.displayName || '';
+      
+      // Detect cut
+      const isCut = statusVal.toUpperCase() === 'CUT' || 
+                    statusVal.toUpperCase() === 'WD' ||
+                    statusVal.toUpperCase() === 'DQ';
+      
+      // Parse position number - try multiple fields
+      let posNum = 999;
+      let posStr = 'CUT';
+      
+      if (!isCut) {
+        // positionDisplay might be "1", "T2", "T10" etc
+        const posRaw = positionDisplay || statusVal;
+        posStr = posRaw || '-';
+        posNum = parseInt(posRaw.replace(/[^0-9]/g, '')) || 999;
+        // If still 999, try sorting by score later
       }
 
+      const thru = c.status?.thru || 0;
+      const totalScore = parseInt(c.score) || 0; // cumulative vs par
+      
+      // Current round score from linescores
+      const linescores = c.linescores || [];
+      const roundScore = linescores.length > 0 ? 
+        parseInt(linescores[linescores.length - 1]?.value || 0) || 0 : 0;
+
+      // Rounds played = number of completed rounds
+      const roundsPlayed = isComplete ? round : Math.max(0, round - (thru < 18 ? 1 : 0));
+      
+      // Stroke points estimated from total score
+      const strokePts = estimateStrokePoints(totalScore, roundsPlayed);
+      
+      // Finish points only when tournament complete
       const finishPts = isCut ? -10 : (isComplete ? calcFinishPoints(posNum, tournamentType) : 0);
       const totalPts = strokePts + finishPts;
 
@@ -140,15 +140,15 @@ async function fetchPGA() {
         tour: 'PGA',
         tournament_name: tournamentName,
         tournament_type: tournamentType,
-        round: parseInt(round),
-        position: isCut ? 'CUT' : posStr || String(posNum),
-        thru: thru,
+        round,
+        position: isCut ? 'CUT' : posStr,
+        thru,
         total_score: totalScore,
-        round_score: parseInt(c.linescores?.[c.linescores.length - 1]?.value || 0) || 0,
-        birdies: getStat(stats, ['birdies','bir']),
-        eagles: getStat(stats, ['eagles','eag']),
-        bogeys: getStat(stats, ['bogeys','bog']),
-        doubles_or_worse: getStat(stats, ['doubles','dbl']) + getStat(stats, ['triples','tri']) + getStat(stats, ['others','oth']),
+        round_score: roundScore,
+        birdies: 0,
+        eagles: 0,
+        bogeys: 0,
+        doubles_or_worse: 0,
         stroke_points: strokePts,
         finish_points: finishPts,
         total_points: totalPts,
@@ -157,8 +157,39 @@ async function fetchPGA() {
       });
     }
 
-    console.log(`PGA: ${players.length} players | stroke pts sample: ${players.slice(0,3).map(p => p.player_name+':'+p.stroke_points).join(', ')}`);
-    return { tournament: tournamentName, round, players };
+    // Sort by total_score to assign positions if ESPN didn't provide them
+    // (handles the position:999 issue)
+    players.sort((a, b) => {
+      if (a.status === 'cut' && b.status !== 'cut') return 1;
+      if (a.status !== 'cut' && b.status === 'cut') return -1;
+      return a.total_score - b.total_score;
+    });
+
+    // Re-assign positions if they're all 999
+    const allPos999 = players.filter(p => p.status !== 'cut').every(p => p.position === '-' || p.position === '999');
+    if (allPos999) {
+      console.log('Positions not from ESPN — assigning from score order');
+      let rank = 1;
+      for (let i = 0; i < players.length; i++) {
+        if (players[i].status === 'cut') break;
+        if (i > 0 && players[i].total_score === players[i-1].total_score) {
+          players[i].position = 'T' + (rank);
+          players[i-1].position = 'T' + (rank);
+        } else {
+          if (i > 0) rank = i + 1;
+          players[i].position = String(rank);
+        }
+        // Recalculate finish pts with new position
+        const pn = parseInt(players[i].position.replace(/[^0-9]/g,'')) || 999;
+        const fp = isComplete ? calcFinishPoints(pn, tournamentType) : 0;
+        players[i].finish_points = fp;
+        players[i].total_points = players[i].stroke_points + fp;
+      }
+    }
+
+    const sample = players.slice(0, 3).map(p => `${p.position}:${p.player_name.split(' ').pop()}(${p.total_score},${p.total_points}pts)`).join(' ');
+    console.log(`PGA: ${players.length} players | Top 3: ${sample}`);
+    return { players };
 
   } catch(e) {
     console.error('PGA fetch error:', e.message);
@@ -166,7 +197,6 @@ async function fetchPGA() {
   }
 }
 
-// ── Fetch LIV ─────────────────────────────────────────────
 async function fetchLIV() {
   try {
     const url = 'https://site.api.espn.com/apis/site/v2/sports/golf/liv/scoreboard';
@@ -175,92 +205,67 @@ async function fetchLIV() {
     const data = await res.json();
     const events = data.events || [];
     if (!events.length) { console.log('LIV: No active event'); return null; }
-
     const event = events[0];
-    const tournamentName = event.name || 'LIV Event';
     const competition = event.competitions?.[0];
     if (!competition) return null;
-
-    const round = competition.status?.period || 3;
+    const round = parseInt(competition.status?.period || 3);
     const isComplete = competition.status?.type?.completed || false;
+    const tournamentName = event.name || 'LIV Event';
     const competitors = competition.competitors || [];
 
     const players = competitors.map((c, idx) => {
-      const posStr = c.status?.position?.displayName || String(idx + 1);
-      const posNum = parseInt(posStr.replace(/[^0-9]/g, '')) || idx + 1;
+      const posStr = c.status?.position?.displayName || c.status?.displayValue || String(idx+1);
+      const posNum = parseInt(posStr.replace(/[^0-9]/g,'')) || idx+1;
       const isBottom27 = posNum > 27;
-      const stats = c.statistics || [];
-      const strokePts = calcStrokePoints(stats);
+      const totalScore = parseInt(c.score) || 0;
+      const strokePts = estimateStrokePoints(totalScore, round);
       const finishPts = isBottom27 ? -10 : (isComplete ? calcFinishPoints(posNum, 'standard') : 0);
-
       return {
         player_name: c.athlete?.displayName || 'Unknown',
-        tour: 'LIV',
-        tournament_name: tournamentName,
-        tournament_type: 'standard',
-        round: parseInt(round),
-        position: posStr,
-        thru: c.status?.thru || (isComplete ? 54 : 0),
-        total_score: parseInt(c.score) || 0,
-        round_score: 0,
-        birdies: getStat(stats, ['birdies','bir']),
-        eagles: getStat(stats, ['eagles','eag']),
-        bogeys: getStat(stats, ['bogeys','bog']),
-        doubles_or_worse: getStat(stats, ['doubles','dbl']),
-        stroke_points: strokePts,
-        finish_points: finishPts,
+        tour: 'LIV', tournament_name: tournamentName, tournament_type: 'standard',
+        round, position: posStr, thru: c.status?.thru || 0,
+        total_score: totalScore, round_score: 0,
+        birdies: 0, eagles: 0, bogeys: 0, doubles_or_worse: 0,
+        stroke_points: strokePts, finish_points: finishPts,
         total_points: strokePts + finishPts,
         status: isBottom27 ? 'bottom27' : 'active',
         updated_at: new Date().toISOString()
       };
     });
-
     console.log(`LIV: ${players.length} players | ${tournamentName}`);
-    return players.length ? { players } : null;
-  } catch(e) {
-    console.log('LIV: No active event');
-    return null;
-  }
+    return { players };
+  } catch(e) { console.log('LIV: No active event'); return null; }
 }
 
-// ── Write to Supabase ─────────────────────────────────────
 async function writeScores(players) {
   if (!players?.length) return;
-  const { error } = await supabase
-    .from('live_scores')
+  const { error } = await supabase.from('live_scores')
     .upsert(players, { onConflict: 'player_name,tournament_name,round' });
   if (error) console.error('Supabase error:', error.message);
-  else console.log(`✅ Wrote ${players.length} players to Supabase`);
+  else console.log(`✅ Wrote ${players.length} players`);
 }
 
-// ── Schema check ──────────────────────────────────────────
 async function checkSchema() {
   const { error } = await supabase.from('live_scores').select('player_name').limit(1);
-  if (error?.code === '42P01') {
-    console.error('❌ live_scores table missing');
-    process.exit(1);
-  }
+  if (error?.code === '42P01') { console.error('❌ Table missing'); process.exit(1); }
   console.log('✅ live_scores table ready');
 }
 
-// ── Main loop ─────────────────────────────────────────────
 async function scrape() {
   console.log(`\n⏰ ${new Date().toISOString()}`);
   const pga = await fetchPGA();
   if (pga?.players?.length) await writeScores(pga.players);
-  else console.log('PGA: No active tournament');
-
+  else console.log('PGA: No data');
   const liv = await fetchLIV();
   if (liv?.players?.length) await writeScores(liv.players);
 }
 
 async function main() {
-  console.log('🏌️  The Field — Live Scoring Scraper v3');
-  console.log('=========================================');
+  console.log('🏌️  The Field — Scraper v4');
   await checkSchema();
   await scrape();
   setInterval(scrape, INTERVAL_MS);
-  console.log(`\n⏱  Scraping every 5 minutes...`);
+  console.log(`\n⏱  Every 5 minutes...`);
 }
 
 main().catch(console.error);
