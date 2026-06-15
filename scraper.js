@@ -1,5 +1,8 @@
-// THE FIELD — Live Scoring Scraper v4
-// Fixed: position parsing + stroke pts from total_score
+// THE FIELD — Live Scoring Scraper v5
+// Updated scoring table (June 2026): all values even so VC x1.5 never produces a fraction
+// Major win +42 (1.5x of +28) · Tournament win +28 · 2nd +20 · 3rd +14 · Top5 +10 · Top10 +6 · Top20 +2 · Missed cut/bottom27 -10
+// Hole in one +20 · Eagle +8 · Birdie +4 · Par 0 · Bogey -2 · Double -4 · Triple -6 · Blob -8
+// Signature event multiplier removed — only Major events carry a multiplier (1.5x)
 
 const fetch = require('node-fetch');
 const { createClient } = require('@supabase/supabase-js');
@@ -11,31 +14,28 @@ const INTERVAL_MS = 5 * 60 * 1000;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const TOURNAMENT_TYPES = {
-  major: ['masters','u.s. open','us open','the open','open championship','pga championship'],
-  signature: ['the players','arnold palmer','genesis invitational','rbc heritage','wells fargo',
-               'memorial','travelers','bmw championship','tour championship','at&t pebble beach']
+  major: ['masters','u.s. open','us open','the open','open championship','pga championship']
 };
 
 function getTournamentType(name) {
   const n = (name || '').toLowerCase();
   if (TOURNAMENT_TYPES.major.some(m => n.includes(m))) return 'major';
-  if (TOURNAMENT_TYPES.signature.some(s => n.includes(s))) return 'signature';
   return 'standard';
 }
 
 function getMultiplier(type) {
-  return type === 'major' ? 1.5 : type === 'signature' ? 1.25 : 1;
+  return type === 'major' ? 1.5 : 1;
 }
 
 function calcFinishPoints(posNum, type) {
   const mult = getMultiplier(type);
   let pts = 0;
-  if (posNum === 1) pts = 25;
-  else if (posNum === 2) pts = 15;
-  else if (posNum === 3) pts = 12;
+  if (posNum === 1) pts = 28;
+  else if (posNum === 2) pts = 20;
+  else if (posNum === 3) pts = 14;
   else if (posNum <= 5) pts = 10;
   else if (posNum <= 10) pts = 6;
-  else if (posNum <= 20) pts = 3;
+  else if (posNum <= 20) pts = 2;
   return Math.round(pts * mult);
 }
 
@@ -44,27 +44,21 @@ function calcFinishPoints(posNum, type) {
 // Use average round scoring as a proxy:
 // Each round of golf has ~18 holes - distribute score across rounds played
 // This is an approximation until we get hole-by-hole data
+//
+// New scoring scale: Birdie +4, Eagle +8, Bogey -2, Double -4
+// Under-par blend (mostly birdies, some eagles): ~3.7 pts per shot under par
+// Over-par blend (mostly bogeys, some doubles): ~-3.0 pts per shot over par
 function estimateStrokePoints(totalScore, roundsPlayed) {
   if (!roundsPlayed || roundsPlayed === 0) return 0;
   const rounds = Math.max(1, roundsPlayed);
-  // totalScore is cumulative vs par across all rounds
-  // Average holes per round = 18
-  // Estimate: each stroke under par = roughly a birdie (not perfect but reasonable)
-  // A player at -10 over 2 rounds probably made ~10+ birdies, some bogeys
-  // Better approximation: score = birdies*(-1) + bogeys*(+1) + eagles*(-2)
-  // If score = -10 over 36 holes: avg -0.28/hole
-  // Rough split: ~11 birdies, 1 eagle = -13, 2 bogeys = +2 → net -11 ≈ -10
-  // Pts: 11*3 + 1*8 + 2*(-1) = 33+8-2 = 39 pts
-  // Simpler model: each shot under par ≈ 2.8 pts average (birdie=3, eagle=8)
-  // each shot over par ≈ -1.5 pts average (bogey=-1, double=-3)
-  
+
   const score = parseInt(totalScore) || 0;
   if (score < 0) {
     // Under par: mix of birdies and eagles
-    return Math.round(Math.abs(score) * 2.8);
+    return Math.round(Math.abs(score) * 3.7);
   } else if (score > 0) {
-    // Over par: mix of bogeys and doubles  
-    return Math.round(score * -1.5);
+    // Over par: mix of bogeys and doubles
+    return Math.round(score * -3.0);
   }
   return 0;
 }
@@ -95,20 +89,20 @@ async function fetchPGA() {
 
     for (const c of (competition.competitors || [])) {
       const name = c.athlete?.displayName || 'Unknown';
-      
+
       // Position: ESPN uses status.position.displayName OR status.displayValue
       const statusVal = c.status?.displayValue || '';
       const positionDisplay = c.status?.position?.displayName || '';
-      
+
       // Detect cut
-      const isCut = statusVal.toUpperCase() === 'CUT' || 
+      const isCut = statusVal.toUpperCase() === 'CUT' ||
                     statusVal.toUpperCase() === 'WD' ||
                     statusVal.toUpperCase() === 'DQ';
-      
+
       // Parse position number - try multiple fields
       let posNum = 999;
       let posStr = 'CUT';
-      
+
       if (!isCut) {
         // positionDisplay might be "1", "T2", "T10" etc
         const posRaw = positionDisplay || statusVal;
@@ -119,18 +113,18 @@ async function fetchPGA() {
 
       const thru = c.status?.thru || 0;
       const totalScore = parseInt(c.score) || 0; // cumulative vs par
-      
+
       // Current round score from linescores
       const linescores = c.linescores || [];
-      const roundScore = linescores.length > 0 ? 
+      const roundScore = linescores.length > 0 ?
         parseInt(linescores[linescores.length - 1]?.value || 0) || 0 : 0;
 
       // Rounds played = number of completed rounds
       const roundsPlayed = isComplete ? round : Math.max(0, round - (thru < 18 ? 1 : 0));
-      
+
       // Stroke points estimated from total score
       const strokePts = estimateStrokePoints(totalScore, roundsPlayed);
-      
+
       // Finish points only when tournament complete
       const finishPts = isCut ? -10 : (isComplete ? calcFinishPoints(posNum, tournamentType) : 0);
       const totalPts = strokePts + finishPts;
@@ -260,11 +254,111 @@ async function scrape() {
   if (liv?.players?.length) await writeScores(liv.players);
 }
 
+// ═══════════ STEP 4: GLOBAL RANKINGS ═══════════
+// For each saved squad, sum each of the 5 active players' total_points
+// across all live_scores rows (their season contribution), applying
+// captain x2 / vice-captain x1.5, then write season_total + week_total
+// to the rankings table. Finally rank all users by season_total.
+//
+// Note: v1 — no auto-substitution. All 5 active players always count,
+// reserves never do. Auto-sub can be layered in once this base pipeline
+// is verified working.
+
+async function calculateRankings() {
+  console.log('\n📊 Calculating rankings...');
+
+  // 1. Fetch all squads
+  const { data: squads, error: squadsErr } = await supabase.from('squads').select('*');
+  if (squadsErr) { console.error('rankings: squads fetch error:', squadsErr.message); return; }
+  if (!squads?.length) { console.log('rankings: no squads saved yet'); return; }
+
+  // 2. Fetch all players (for id -> name mapping)
+  const { data: players, error: playersErr } = await supabase.from('players').select('id,name');
+  if (playersErr) { console.error('rankings: players fetch error:', playersErr.message); return; }
+  const playerNameById = {};
+  (players || []).forEach(p => { playerNameById[String(p.id)] = p.name; });
+
+  // 3. Fetch all live_scores
+  const { data: scores, error: scoresErr } = await supabase.from('live_scores').select('*');
+  if (scoresErr) { console.error('rankings: live_scores fetch error:', scoresErr.message); return; }
+
+  // Find the most recent round per tournament (used for "week_total")
+  let latestRound = 0;
+  let latestTournament = null;
+  (scores || []).forEach(s => {
+    if (s.round > latestRound) { latestRound = s.round; latestTournament = s.tournament_name; }
+  });
+
+  // Group live_scores by player_name for fast lookup
+  const scoresByPlayer = {};
+  (scores || []).forEach(s => {
+    if (!scoresByPlayer[s.player_name]) scoresByPlayer[s.player_name] = [];
+    scoresByPlayer[s.player_name].push(s);
+  });
+
+  const results = [];
+
+  for (const squad of squads) {
+    const ids = squad.player_ids || [];
+    const activeIds = ids.slice(0, 5); // first 5 are active, last 2 are reserves
+    const capId = String(squad.captain_id || '');
+    const vcId = String(squad.vice_captain_id || '');
+
+    let seasonTotal = 0;
+    let weekTotal = 0;
+
+    for (const pid of activeIds) {
+      const name = playerNameById[String(pid)];
+      if (!name) continue;
+      const rows = scoresByPlayer[name] || [];
+
+      // Sum this player's points across every gameweek they've played
+      let playerSeasonPts = 0;
+      let playerWeekPts = 0;
+      rows.forEach(r => {
+        playerSeasonPts += (r.total_points || 0);
+        if (r.round === latestRound && r.tournament_name === latestTournament) {
+          playerWeekPts += (r.total_points || 0);
+        }
+      });
+
+      // Apply captain / vice-captain multiplier to this player's contribution
+      let mult = 1;
+      if (String(pid) === capId) mult = 2;
+      else if (String(pid) === vcId) mult = 1.5;
+
+      seasonTotal += Math.round(playerSeasonPts * mult);
+      weekTotal += Math.round(playerWeekPts * mult);
+    }
+
+    results.push({
+      user_id: squad.user_id,
+      team_name: squad.team_name || 'My Team',
+      season_total: seasonTotal,
+      week_total: weekTotal
+    });
+  }
+
+  // 4. Rank by season_total descending
+  results.sort((a, b) => b.season_total - a.season_total);
+  results.forEach((r, i) => { r.rank = i + 1; r.updated_at = new Date().toISOString(); });
+
+  // 5. Write to rankings table
+  const { error: writeErr } = await supabase.from('rankings')
+    .upsert(results, { onConflict: 'user_id' });
+  if (writeErr) console.error('rankings: write error:', writeErr.message);
+  else console.log(`✅ Rankings updated for ${results.length} squad(s)`);
+}
+
 async function main() {
-  console.log('🏌️  The Field — Scraper v4');
+  console.log('🏌️  The Field — Scraper v5');
   await checkSchema();
   await scrape();
-  setInterval(scrape, INTERVAL_MS);
+  await calculateRankings();
+  setInterval(async () => {
+    await scrape();
+    await calculateRankings();
+  }, INTERVAL_MS);
   console.log(`\n⏱  Every 5 minutes...`);
 }
 
