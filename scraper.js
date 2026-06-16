@@ -350,14 +350,41 @@ async function calculateRankings() {
   else console.log(`✅ Rankings updated for ${results.length} squad(s)`);
 }
 
+async function fetchNews() {
+  try {
+    const res = await fetch('https://site.api.espn.com/apis/site/v2/sports/golf/pga/news?limit=20', { timeout: 15000 });
+    if (!res.ok) return;
+    const data = await res.json();
+    const articles = (data.articles || []).map(a => ({
+      headline: a.headline || a.title || '',
+      summary: a.description || '',
+      url: a.links?.web?.href || 'https://www.espn.com/golf/',
+      author: a.byline || 'ESPN Golf',
+      published_at: a.published || a.lastModified || new Date().toISOString(),
+      tour: 'PGA'
+    })).filter(a => a.headline);
+
+    if (!articles.length) return;
+
+    const { error } = await supabase.from('golf_news')
+      .upsert(articles, { onConflict: 'url' });
+    if (error) console.error('News write error:', error.message);
+    else console.log(`✅ News: ${articles.length} articles`);
+  } catch(e) {
+    console.log('News fetch error:', e.message);
+  }
+}
+
 async function main() {
   console.log('🏌️  The Field — Scraper v5');
   await checkSchema();
   await scrape();
   await calculateRankings();
+  await fetchNews();
   setInterval(async () => {
     await scrape();
     await calculateRankings();
+    await fetchNews();
   }, INTERVAL_MS);
   console.log(`\n⏱  Every 5 minutes...`);
 }
