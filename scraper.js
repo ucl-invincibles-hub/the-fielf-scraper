@@ -79,6 +79,21 @@ async function fetchPGA() {
     const competition = event.competitions?.[0];
     if (!competition) return null;
 
+    // Write tournament info including start time for deadline calculation
+    try {
+      const startDate = event.date || competition.date || null;
+      const venue = event.venues?.[0]?.fullName || competition.venue?.fullName || null;
+      await supabase.from('tournament_info').upsert({
+        id: 1,
+        tournament_name: tournamentName,
+        course: venue,
+        first_tee_time: startDate,
+        deadline: startDate ? new Date(new Date(startDate).getTime() - 60*60*1000).toISOString() : null,
+        round: parseInt(competition.status?.period || 1),
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'id' });
+    } catch(e) { console.log('tournament_info write error:', e.message); }
+
     const round = parseInt(competition.status?.period || 1);
     const statusDesc = competition.status?.type?.description || '';
     const isComplete = competition.status?.type?.completed || false;
