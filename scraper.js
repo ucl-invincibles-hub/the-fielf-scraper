@@ -297,11 +297,22 @@ async function calculateRankings() {
   const { data: scores, error: scoresErr } = await supabase.from('live_scores').select('*');
   if (scoresErr) { console.error('rankings: live_scores fetch error:', scoresErr.message); return; }
 
-  // Find the most recent round per tournament (used for "week_total")
-  let latestRound = 0;
+  // Find the most recently updated tournament (used for "week_total")
   let latestTournament = null;
+  let latestUpdated = null;
+  let latestRound = 0;
   (scores || []).forEach(s => {
-    if (s.round > latestRound) { latestRound = s.round; latestTournament = s.tournament_name; }
+    const updated = new Date(s.updated_at || 0);
+    if (!latestUpdated || updated > latestUpdated) {
+      latestUpdated = updated;
+      latestTournament = s.tournament_name;
+    }
+  });
+  // Get highest round for that tournament
+  (scores || []).forEach(s => {
+    if (s.tournament_name === latestTournament && s.round > latestRound) {
+      latestRound = s.round;
+    }
   });
 
   // Group live_scores by player_name for fast lookup
