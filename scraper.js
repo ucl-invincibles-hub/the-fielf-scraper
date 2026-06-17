@@ -504,6 +504,7 @@ async function checkNewSignups() {
 }
 
 
+async function main() {
   console.log('🏌️  The Field — Scraper v5');
   await checkSchema();
   await scrape();
