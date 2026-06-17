@@ -401,16 +401,120 @@ async function fetchNews() {
   }
 }
 
-async function main() {
+const RESEND_KEY = process.env.RESEND_KEY || 're_BHDrpAUM_MgkUxYGobae6yuy3Fu5Nskno';
+
+async function sendWelcomeEmail(email, teamName) {
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${RESEND_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: 'The Field Fantasy Golf <office@thefieldfantasygolf.com>',
+        to: email,
+        subject: 'Welcome to The Field ⛳',
+        html: `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f4f0e8;font-family:system-ui,-apple-system,sans-serif">
+<div style="max-width:560px;margin:0 auto;padding:40px 20px">
+<div style="background:#0f1a0f;border-radius:12px;overflow:hidden">
+<div style="padding:40px 40px 32px;text-align:center;border-bottom:1px solid rgba(200,168,48,0.2)">
+  <div style="font-family:Georgia,serif;font-size:32px;font-weight:700;color:#f0f0f0;letter-spacing:2px;margin-bottom:4px">The Field</div>
+  <div style="font-size:11px;font-weight:700;letter-spacing:3px;color:#c8a830;text-transform:uppercase;margin-bottom:2px">Fantasy Golf</div>
+  <div style="font-style:italic;font-family:Georgia,serif;font-size:13px;color:#c8a830">The Gentlemen's Game</div>
+</div>
+<div style="padding:40px">
+  <p style="font-family:Georgia,serif;font-size:22px;color:#f0f0f0;margin:0 0 6px;font-weight:700">You're in. Welcome to The Field.</p>
+  <p style="font-size:13px;color:#4a6b4a;margin:0 0 24px;line-height:1.6;font-style:italic">Fantasy golf the way it was always meant to be played.</p>
+  <p style="font-size:14px;color:#c8d8c8;line-height:1.9;margin:0 0 10px">Most fantasy golf is a leaderboard check on Sunday afternoon. <strong style="color:#f0f0f0">The Field is different.</strong> Your squad scores in real time — every birdie earns, every eagle flies, and every triple bogey on the 18th on a Saturday evening will have your group chat absolutely on fire.</p>
+  <p style="font-size:14px;color:#c8d8c8;line-height:1.9;margin:0 0 28px">Your Captain earns double points. Which also means when he makes a blob on the par 5 — you'll feel it. That's the beauty of it.</p>
+  <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(200,168,48,0.2);border-radius:8px;padding:24px;margin-bottom:24px">
+    <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:#c8a830;text-transform:uppercase;margin-bottom:16px">How it works</div>
+    <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0 0 10px"><strong style="color:#f0f0f0">1. Pick 7 golfers</strong> from the PGA Tour and LIV Golf within a £50m budget. Mix the world number one with a LIV dark horse. The bold call wins leagues.</p>
+    <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0 0 10px"><strong style="color:#f0f0f0">2. Name your Captain (2×) and Vice Captain (1.5×).</strong> Back the right man and the points stack up fast. Back the wrong one and the group chat will remind you. Repeatedly.</p>
+    <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0 0 10px"><strong style="color:#f0f0f0">3. Use your chips wisely.</strong> Triple Captain, Vice, Mulligan, Full Bag — one shot at each, all season. Use them well and you look like a genius. Use them badly and, well, see point 2.</p>
+    <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0"><strong style="color:#f0f0f0">4. Compete all season</strong> in private leagues, a global leaderboard, and a weekly sweepstake where the pot is entirely in your hands.</p>
+  </div>
+  <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:20px;margin-bottom:24px">
+    <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:#4ade80;text-transform:uppercase;margin-bottom:12px">The Weekly Sweepstake</div>
+    <p style="font-size:13px;color:#c8d8c8;line-height:1.7;margin:0 0 12px">Each gameweek, enter The Field sweepstake. Pick your stake — from <strong style="color:#f0f0f0">The Shilling (£1)</strong> to <strong style="color:#f0f0f0">The Tenner (£10)</strong>. Every penny goes into the pot. The pot is split between the top finishers at the end of the week. No house edge. No nonsense.</p>
+    <p style="font-family:Georgia,serif;font-size:14px;color:#c8a830;font-style:italic;margin:0;text-align:center">"Create Your Own Luck. The Pot Is In Your Hands."</p>
+  </div>
+  <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:20px;margin-bottom:24px">
+    <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:#4ade80;text-transform:uppercase;margin-bottom:12px">Paid Pot Leagues</div>
+    <p style="font-size:13px;color:#c8d8c8;line-height:1.7;margin:0 0 12px">Create a private league with your mates and set an entry fee. £5, £10, £20, £50 — your call. Winner takes the pot at the end of the season, paid automatically.</p>
+    <p style="font-size:13px;color:#c8d8c8;line-height:1.7;margin:0 0 14px">And the days of chasing your mates round the houses for your fantasy winnings? Behind you. Stripe handles it. The gentleman always gets paid.</p>
+    <p style="font-family:Georgia,serif;font-size:14px;color:#c8a830;font-style:italic;margin:0;text-align:center">"A gentleman always pays his debts — and a gentleman always collects what he is owed."</p>
+  </div>
+  <table style="width:100%;border:1px solid rgba(200,168,48,0.25);border-radius:8px;border-collapse:separate;border-spacing:0;margin-bottom:28px;overflow:hidden">
+    <tr><td colspan="3" style="padding:14px 20px;border-bottom:1px solid rgba(200,168,48,0.15);text-align:center;font-size:11px;font-weight:700;letter-spacing:2px;color:#c8a830;text-transform:uppercase">Season Prizes</td></tr>
+    <tr>
+      <td style="padding:18px 14px;text-align:center;border-right:1px solid rgba(200,168,48,0.1);width:33%"><div style="font-size:20px;margin-bottom:6px">🥇</div><div style="font-size:10px;font-weight:700;color:#c8a830;margin-bottom:6px">1ST PLACE</div><div style="font-family:Georgia,serif;font-size:12px;color:#f0f0f0;line-height:1.5">Sunday Hospitality at The Open Championship</div></td>
+      <td style="padding:18px 14px;text-align:center;border-right:1px solid rgba(200,168,48,0.1);width:33%"><div style="font-size:20px;margin-bottom:6px">🥈</div><div style="font-size:10px;font-weight:700;color:#9ca3af;margin-bottom:6px">2ND PLACE</div><div style="font-family:Georgia,serif;font-size:12px;color:#f0f0f0;line-height:1.5">Portugal Golf Holiday</div></td>
+      <td style="padding:18px 14px;text-align:center;width:33%"><div style="font-size:20px;margin-bottom:6px">🥉</div><div style="font-size:10px;font-weight:700;color:#cd7f32;margin-bottom:6px">3RD PLACE</div><div style="font-family:Georgia,serif;font-size:12px;color:#f0f0f0;line-height:1.5">Premium Golf Equipment</div></td>
+    </tr>
+  </table>
+  <div style="text-align:center;margin-bottom:32px">
+    <a href="https://thefieldfantasygolf.com" style="display:inline-block;background:#1a6b35;color:#ffffff;font-weight:700;font-size:14px;padding:16px 40px;border-radius:8px;text-decoration:none;letter-spacing:0.5px">Build Your Squad Now</a>
+    <div style="font-size:11px;color:#2a4a2a;margin-top:10px">Free to play. Transfers open now.</div>
+  </div>
+  <p style="font-size:13px;color:#4a6b4a;line-height:1.7;margin:0 0 16px">You're part of the beta — which means you're shaping what The Field becomes. If something isn't right, reply to this email. We actually read them.</p>
+  <p style="font-family:Georgia,serif;font-size:14px;color:#c8a830;margin:0 0 14px;font-style:italic">The Gentlemen's Game awaits.</p>
+  <p style="font-size:13px;color:#f0f0f0;margin:0;line-height:1.8">Brandon<br>Founder, The Field Fantasy Golf<br><a href="mailto:office@thefieldfantasygolf.com" style="color:#f0f0f0;text-decoration:none">office@thefieldfantasygolf.com</a><br><a href="https://thefieldfantasygolf.com" style="color:#f0f0f0;text-decoration:none">thefieldfantasygolf.com</a></p>
+</div>
+<div style="padding:20px 40px;border-top:1px solid rgba(255,255,255,0.06);text-align:center">
+  <div style="font-size:10px;color:#1a3a1a">You're receiving this because you signed up to The Field Fantasy Golf.</div>
+</div>
+</div></div></body></html>`
+      })
+    });
+    const data = await res.json();
+    if (data.id) console.log(`✅ Welcome email sent to ${email}`);
+    else console.log(`⚠️ Email send failed:`, data);
+  } catch(e) {
+    console.log('Welcome email error:', e.message);
+  }
+}
+
+async function checkNewSignups() {
+  try {
+    // Get all users from auth
+    const { data: users, error } = await supabase.auth.admin.listUsers();
+    if (error || !users) return;
+
+    // Get list of already-welcomed users
+    const { data: welcomed } = await supabase
+      .from('welcomed_users')
+      .select('user_id');
+    const welcomedIds = new Set((welcomed || []).map(w => w.user_id));
+
+    // Send welcome to any new users
+    for (const user of users.users) {
+      if (!welcomedIds.has(user.id) && user.email) {
+        await sendWelcomeEmail(user.email);
+        // Mark as welcomed
+        await supabase.from('welcomed_users').insert({ user_id: user.id, email: user.email, sent_at: new Date().toISOString() });
+        // Small delay between emails
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+  } catch(e) {
+    console.log('checkNewSignups error:', e.message);
+  }
+}
+
+
   console.log('🏌️  The Field — Scraper v5');
   await checkSchema();
   await scrape();
   await calculateRankings();
   await fetchNews();
+  await checkNewSignups();
   setInterval(async () => {
     await scrape();
     await calculateRankings();
     await fetchNews();
+    await checkNewSignups();
   }, INTERVAL_MS);
   console.log(`\n⏱  Every 5 minutes...`);
 }
