@@ -123,7 +123,9 @@ async function fetchPGA() {
         // If still 999, try sorting by score later
       }
 
-      const thru = c.status?.thru || 0;
+      const thru = c.status?.thru || c.status?.period || 0;
+      // Debug first player to see raw structure
+      if (players.length === 0) console.log('ESPN competitor status sample:', JSON.stringify(c.status));
       const totalScore = parseInt(c.score) || 0; // cumulative vs par
 
       // Current round score from linescores
