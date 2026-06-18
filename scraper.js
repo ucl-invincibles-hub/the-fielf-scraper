@@ -9,7 +9,7 @@ const { createClient } = require('@supabase/supabase-js');
 
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://peekrbzmaocuportertr.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBlZWtyYnptYW9jdXBvcnRlcnRyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MTE5MjM2OCwiZXhwIjoyMDk2NzY4MzY4fQ.4XbODFXnJBOphYw6p1YvskqHwclH_s22G_VbykXQV2U';
-const INTERVAL_MS = 5 * 60 * 1000;
+const INTERVAL_MS = 2 * 60 * 1000;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -49,18 +49,13 @@ function calcFinishPoints(posNum, type) {
 // Under-par blend (mostly birdies, some eagles): ~3.7 pts per shot under par
 // Over-par blend (mostly bogeys, some doubles): ~-3.0 pts per shot over par
 function estimateStrokePoints(totalScore, roundsPlayed) {
-  if (!roundsPlayed || roundsPlayed === 0) return 0;
-  const rounds = Math.max(1, roundsPlayed);
-
   const score = parseInt(totalScore) || 0;
+  if (score === 0) return 0;
   if (score < 0) {
-    // Under par: mix of birdies and eagles
     return Math.round(Math.abs(score) * 3.7);
-  } else if (score > 0) {
-    // Over par: mix of bogeys and doubles
+  } else {
     return Math.round(score * -3.0);
   }
-  return 0;
 }
 
 async function fetchPGA() {
@@ -134,8 +129,8 @@ async function fetchPGA() {
       const roundScore = linescores.length > 0 ?
         parseInt(linescores[linescores.length - 1]?.value || 0) || 0 : 0;
 
-      // Rounds played = number of completed rounds
-      const roundsPlayed = isComplete ? round : Math.max(0, round - (thru < 18 ? 1 : 0));
+      // Rounds played — treat current in-progress round as counting if player has a score
+      const roundsPlayed = isComplete ? round : (totalScore !== 0 || thru > 0 ? round : Math.max(0, round - 1));
 
       // Stroke points estimated from total score
       const strokePts = estimateStrokePoints(totalScore, roundsPlayed);
