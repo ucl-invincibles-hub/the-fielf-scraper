@@ -52,9 +52,11 @@ function estimateStrokePoints(totalScore, roundsPlayed) {
   const score = parseInt(totalScore) || 0;
   if (score === 0) return 0;
   if (score < 0) {
-    return Math.round(Math.abs(score) * 3.7);
+    // Assume all shots under par are birdies: -1 = +4pts
+    return Math.abs(score) * 4;
   } else {
-    return Math.round(score * -3.0);
+    // Assume all shots over par are bogeys: +1 = -2pts
+    return score * -2;
   }
 }
 
