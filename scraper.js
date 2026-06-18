@@ -248,6 +248,21 @@ async function fetchLIV() {
 
 async function writeScores(players) {
   if (!players?.length) return;
+  
+  // Check if tournament has changed — if so clear old data first
+  const newTournament = players[0]?.tournament_name;
+  if (newTournament) {
+    const { data: existing } = await supabase
+      .from('live_scores')
+      .select('tournament_name')
+      .limit(1);
+    const oldTournament = existing?.[0]?.tournament_name;
+    if (oldTournament && oldTournament !== newTournament) {
+      console.log(`🔄 New tournament detected: ${newTournament} (was ${oldTournament}) — clearing old data`);
+      await supabase.from('live_scores').delete().eq('tournament_name', oldTournament);
+    }
+  }
+
   const { error } = await supabase.from('live_scores')
     .upsert(players, { onConflict: 'player_name,tournament_name,round' });
   if (error) console.error('Supabase error:', error.message);
