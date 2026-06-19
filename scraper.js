@@ -499,26 +499,24 @@ async function sendWelcomeEmail(email, teamName) {
 
 async function checkNewSignups() {
   try {
-    // Get all users from auth
+    console.log('🔍 Checking new signups...');
     const { data: users, error } = await supabase.auth.admin.listUsers();
-    if (error || !users) return;
+    if (error) { console.log('❌ listUsers error:', error.message); return; }
+    if (!users || !users.users) { console.log('❌ No users data returned'); return; }
 
-    // Get list of already-welcomed users
-    const { data: welcomed } = await supabase
-      .from('welcomed_users')
-      .select('user_id');
+    const { data: welcomed } = await supabase.from('welcomed_users').select('user_id');
     const welcomedIds = new Set((welcomed || []).map(w => w.user_id));
+    console.log(`👥 Total users: ${users.users.length}, Already welcomed: ${welcomedIds.size}`);
 
-    // Send welcome to any new users
     for (const user of users.users) {
       if (!welcomedIds.has(user.id) && user.email) {
+        console.log(`📧 Sending welcome to: ${user.email}`);
         await sendWelcomeEmail(user.email);
-        // Mark as welcomed
         await supabase.from('welcomed_users').insert({ user_id: user.id, email: user.email, sent_at: new Date().toISOString() });
-        // Small delay between emails
         await new Promise(r => setTimeout(r, 500));
       }
     }
+    console.log('✅ checkNewSignups complete');
   } catch(e) {
     console.log('checkNewSignups error:', e.message);
   }
