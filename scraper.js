@@ -428,7 +428,7 @@ async function sendWelcomeEmail(email, teamName) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        from: 'The Field Fantasy Golf <hello@mail.thefieldfantasygolf.com>',
+        from: 'The Field Fantasy Golf <onboarding@resend.dev>',
         to: email,
         subject: 'Welcome to The Field ⛳',
         html: `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f4f0e8;font-family:system-ui,-apple-system,sans-serif">
