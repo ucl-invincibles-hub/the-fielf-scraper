@@ -417,7 +417,7 @@ async function fetchNews() {
   }
 }
 
-const RESEND_KEY = process.env.RESEND_KEY || 're_BHDrpAUM_MgkUxYGobae6yuy3Fu5Nskno';
+const RESEND_KEY = process.env.RESEND_KEY;
 
 async function sendWelcomeEmail(email, teamName) {
   try {
