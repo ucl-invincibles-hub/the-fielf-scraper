@@ -259,6 +259,7 @@ async function writeScores(players) {
     if (oldTournament && oldTournament !== newTournament) {
       console.log(`🔄 New tournament detected: ${newTournament} (was ${oldTournament}) — clearing old data`);
       await supabase.from('live_scores').delete().eq('tournament_name', oldTournament);
+      await bankTransfers(oldTournament);
     }
   }
 
@@ -426,7 +427,7 @@ async function sendWelcomeEmail(email, teamName) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        from: 'The Field Fantasy Golf <onboarding@resend.dev>',
+        from: 'The Field Fantasy Golf <office@mail.thefieldfantasygolf.com>',
         to: email,
         subject: 'Welcome to The Field ⛳',
         html: `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f4f0e8;font-family:system-ui,-apple-system,sans-serif">
@@ -441,7 +442,12 @@ async function sendWelcomeEmail(email, teamName) {
   <p style="font-family:Georgia,serif;font-size:22px;color:#f0f0f0;margin:0 0 6px;font-weight:700">You're in. Welcome to The Field.</p>
   <p style="font-size:13px;color:#4a6b4a;margin:0 0 24px;line-height:1.6;font-style:italic">Fantasy golf the way it was always meant to be played.</p>
   <p style="font-size:14px;color:#c8d8c8;line-height:1.9;margin:0 0 10px">Most fantasy golf is a leaderboard check on Sunday afternoon. <strong style="color:#f0f0f0">The Field is different.</strong> Your squad scores in real time — every birdie earns, every eagle flies, and every triple bogey on the 18th on a Saturday evening will have your group chat absolutely on fire.</p>
-  <p style="font-size:14px;color:#c8d8c8;line-height:1.9;margin:0 0 28px">Your Captain earns double points. Which also means when he makes a blob on the par 5 — you'll feel it. That's the beauty of it.</p>
+  <p style="font-size:14px;color:#c8d8c8;line-height:1.9;margin:0 0 20px">Your Captain earns double points. Which also means when he makes a blob on the par 5 — you'll feel it. That's the beauty of it.</p>
+  <div style="background:rgba(200,168,48,0.06);border:1px solid rgba(200,168,48,0.2);border-radius:8px;padding:20px;margin-bottom:28px;text-align:center">
+    <p style="font-family:Georgia,serif;font-size:14px;color:#c8d8c8;font-style:italic;line-height:1.8;margin:0 0 12px">"Golf has always been played in 4-balls. Saturday morning. Four players. A small wager. Eighteen holes. Settle up at the 19th over a pint.</p>
+    <p style="font-family:Georgia,serif;font-size:14px;color:#c8d8c8;font-style:italic;line-height:1.8;margin:0 0 12px">The Field is that — but all season long, across the PGA Tour and LIV Golf, with a prize at the end worth a lot more than a round of drinks."</p>
+    <p style="font-family:Georgia,serif;font-size:14px;color:#c8a830;font-weight:700;margin:0">Pick your 4-ball. Name your captain. Let them play.</p>
+  </div>
   <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(200,168,48,0.2);border-radius:8px;padding:24px;margin-bottom:24px">
     <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:#c8a830;text-transform:uppercase;margin-bottom:16px">How it works</div>
     <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0 0 10px"><strong style="color:#f0f0f0">1. Pick 7 golfers</strong> from the PGA Tour and LIV Golf within a £50m budget. Mix the world number one with a LIV dark horse. The bold call wins leagues.</p>
@@ -517,6 +523,36 @@ async function checkNewSignups() {
   }
 }
 
+
+// Bank unused transfers at end of gameweek
+// Called when scraper detects tournament has changed
+async function bankTransfers(completedGameweek) {
+  try {
+    console.log(`🏦 Banking transfers for: ${completedGameweek}`);
+    const { data: allowances } = await supabase
+      .from('transfer_allowance')
+      .select('*')
+      .eq('gameweek', completedGameweek);
+    if (!allowances || !allowances.length) { console.log('No transfer allowances to bank'); return; }
+    for (const a of allowances) {
+      const unused = Math.max(0, a.free_transfers_available - a.transfers_used);
+      const nextFree = Math.min(2, 1 + (unused > 0 ? 1 : 0));
+      console.log(`👤 User ${a.user_id}: ${nextFree} free transfers next week`);
+      await supabase.from('transfer_allowance').update({ banked_for_next: nextFree })
+        .eq('user_id', a.user_id).eq('gameweek', completedGameweek);
+    }
+    console.log(`✅ Transfer banking complete for ${completedGameweek}`);
+  } catch(e) { console.log('bankTransfers error:', e.message); }
+}
+
+async function getBankedTransfers(userId) {
+  try {
+    const { data } = await supabase.from('transfer_allowance')
+      .select('banked_for_next').eq('user_id', userId)
+      .order('created_at', { ascending: false }).limit(1);
+    return (data && data.length && data[0].banked_for_next) ? data[0].banked_for_next : 1;
+  } catch(e) { return 1; }
+}
 
 async function main() {
   console.log('🏌️  The Field — Scraper v5');
