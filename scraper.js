@@ -264,7 +264,7 @@ async function writeScores(players) {
   }
 
   const { error } = await supabase.from('live_scores')
-    .upsert(players, { onConflict: 'player_name,tournament_name,round' });
+    .upsert(players, { onConflict: 'player_name,tournament_name' });
   if (error) console.error('Supabase error:', error.message);
   else console.log(`✅ Wrote ${players.length} players`);
 }
@@ -353,15 +353,16 @@ async function calculateRankings() {
       if (!name) continue;
       const rows = scoresByPlayer[name] || [];
 
-      // Sum this player's points across every gameweek they've played
-      let playerSeasonPts = 0;
+      // With one row per player per tournament, total_points = this week's points
+      // Season total needs to come from a separate accumulation — for now use week_total
+      // as both until we build proper season history table
       let playerWeekPts = 0;
       rows.forEach(r => {
-        playerSeasonPts += (r.total_points || 0);
-        if (r.round === latestRound && r.tournament_name === latestTournament) {
+        if (r.tournament_name === latestTournament) {
           playerWeekPts += (r.total_points || 0);
         }
       });
+      let playerSeasonPts = playerWeekPts; // TODO: accumulate from completed gameweeks
 
       // Apply captain / vice-captain multiplier to this player's contribution
       let mult = 1;
@@ -427,7 +428,7 @@ async function sendWelcomeEmail(email, teamName) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        from: 'The Field Fantasy Golf <office@mail.thefieldfantasygolf.com>',
+        from: 'The Field Fantasy Golf <hello@mail.thefieldfantasygolf.com>',
         to: email,
         subject: 'Welcome to The Field ⛳',
         html: `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f4f0e8;font-family:system-ui,-apple-system,sans-serif">
