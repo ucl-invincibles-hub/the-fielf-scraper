@@ -6,6 +6,12 @@
 
 const fetch = require('node-fetch');
 const { createClient } = require('@supabase/supabase-js');
+const express = require('express');
+const Stripe = require('stripe');
+
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://peekrbzmaocuportertr.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBlZWtyYnptYW9jdXBvcnRlcnRyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MTE5MjM2OCwiZXhwIjoyMDk2NzY4MzY4fQ.4XbODFXnJBOphYw6p1YvskqHwclH_s22G_VbykXQV2U';
@@ -552,6 +558,212 @@ async function getBankedTransfers(userId) {
     return (data && data.length && data[0].banked_for_next) ? data[0].banked_for_next : 1;
   } catch(e) { return 1; }
 }
+
+// ============================================
+// PAYMENTS API SERVER
+// ============================================
+
+const app = express();
+app.use(express.json({
+  verify: (req, res, buf) => { req.rawBody = buf; } // needed for Stripe webhook signature check
+}));
+
+// CORS for frontend calls
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
+
+// Helper — verify user from Supabase auth token
+async function getUserFromToken(authHeader) {
+  if (!authHeader) return null;
+  const token = authHeader.replace('Bearer ', '');
+  try {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${token}` }
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch(e) { return null; }
+}
+
+// Helper — check master payments switch
+async function paymentsEnabled() {
+  try {
+    const { data } = await supabase.from('platform_settings').select('payments_enabled').eq('id', 1).single();
+    return data ? data.payments_enabled : false;
+  } catch(e) { return false; }
+}
+
+// ---- GLOBAL SWEEPSTAKE: Create Checkout Session ----
+app.post('/api/sweepstake/checkout', async (req, res) => {
+  try {
+    if (!stripe) return res.status(503).json({ error: 'Payments not configured' });
+    const enabled = await paymentsEnabled();
+    if (!enabled) return res.status(403).json({ error: 'Payments are not yet enabled' });
+
+    const user = await getUserFromToken(req.headers.authorization);
+    if (!user || !user.id) return res.status(401).json({ error: 'Not authenticated' });
+
+    const { stakePence, tournamentName } = req.body;
+    if (!stakePence || !tournamentName) return res.status(400).json({ error: 'Missing stakePence or tournamentName' });
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'gbp',
+          product_data: { name: `The Field — Weekly Sweepstake (${tournamentName})` },
+          unit_amount: stakePence
+        },
+        quantity: 1
+      }],
+      metadata: { user_id: user.id, type: 'global_sweepstake', tournament_name: tournamentName, stake_pence: String(stakePence) },
+      success_url: 'https://thefieldfantasygolf.com/?payment=success',
+      cancel_url: 'https://thefieldfantasygolf.com/?payment=cancelled'
+    });
+
+    // Pre-create pending entry
+    await supabase.from('sweepstake_entries').insert({
+      user_id: user.id,
+      tournament_name: tournamentName,
+      stake_pence: stakePence,
+      stripe_session_id: session.id,
+      payment_status: 'pending'
+    });
+
+    res.json({ url: session.url });
+  } catch(e) {
+    console.log('checkout error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---- PRIVATE SWEEPSTAKE: Create Checkout Session ----
+app.post('/api/private-sweepstake/checkout', async (req, res) => {
+  try {
+    if (!stripe) return res.status(503).json({ error: 'Payments not configured' });
+    const enabled = await paymentsEnabled();
+    if (!enabled) return res.status(403).json({ error: 'Payments are not yet enabled' });
+
+    const user = await getUserFromToken(req.headers.authorization);
+    if (!user || !user.id) return res.status(401).json({ error: 'Not authenticated' });
+
+    const { sweepstakeId } = req.body;
+    if (!sweepstakeId) return res.status(400).json({ error: 'Missing sweepstakeId' });
+
+    const { data: sweep } = await supabase.from('private_sweepstakes').select('*').eq('id', sweepstakeId).single();
+    if (!sweep) return res.status(404).json({ error: 'Sweepstake not found' });
+    if (sweep.status !== 'open') return res.status(400).json({ error: 'Sweepstake is no longer open' });
+
+    // Check not already entered
+    const { data: existing } = await supabase.from('private_sweepstake_entries')
+      .select('id').eq('sweepstake_id', sweepstakeId).eq('user_id', user.id).maybeSingle();
+    if (existing) return res.status(400).json({ error: 'Already entered this sweepstake' });
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'gbp',
+          product_data: { name: `The Field — Private Sweepstake (${sweep.tournament_name || sweep.gameweek})` },
+          unit_amount: sweep.stake_amount_pence
+        },
+        quantity: 1
+      }],
+      metadata: { user_id: user.id, type: 'private_sweepstake', sweepstake_id: sweepstakeId },
+      success_url: 'https://thefieldfantasygolf.com/?payment=success',
+      cancel_url: 'https://thefieldfantasygolf.com/?payment=cancelled'
+    });
+
+    await supabase.from('private_sweepstake_entries').insert({
+      sweepstake_id: sweepstakeId,
+      user_id: user.id,
+      stripe_session_id: session.id,
+      payment_status: 'pending'
+    });
+
+    res.json({ url: session.url });
+  } catch(e) {
+    console.log('private checkout error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---- STRIPE WEBHOOK: Confirm payments ----
+app.post('/api/stripe/webhook', async (req, res) => {
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.rawBody, req.headers['stripe-signature'], STRIPE_WEBHOOK_SECRET);
+  } catch(e) {
+    console.log('Webhook signature error:', e.message);
+    return res.status(400).send(`Webhook Error: ${e.message}`);
+  }
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const meta = session.metadata || {};
+
+    try {
+      if (meta.type === 'global_sweepstake') {
+        await supabase.from('sweepstake_entries')
+          .update({ payment_status: 'paid', stripe_payment_intent_id: session.payment_intent })
+          .eq('stripe_session_id', session.id);
+        console.log(`✅ Global sweepstake payment confirmed: ${meta.user_id}`);
+      }
+      if (meta.type === 'private_sweepstake') {
+        await supabase.from('private_sweepstake_entries')
+          .update({ payment_status: 'paid', stripe_payment_intent_id: session.payment_intent })
+          .eq('stripe_session_id', session.id);
+        // Update pot total
+        const { data: sweep } = await supabase.from('private_sweepstakes').select('*').eq('id', meta.sweepstake_id).single();
+        if (sweep) {
+          await supabase.from('private_sweepstakes')
+            .update({ total_pot_pence: (sweep.total_pot_pence || 0) + session.amount_total })
+            .eq('id', meta.sweepstake_id);
+        }
+        console.log(`✅ Private sweepstake payment confirmed: ${meta.user_id}`);
+      }
+    } catch(e) { console.log('Webhook processing error:', e.message); }
+  }
+
+  res.json({ received: true });
+});
+
+// ---- Get payments enabled status (public) ----
+app.get('/api/payments-status', async (req, res) => {
+  const enabled = await paymentsEnabled();
+  res.json({ enabled });
+});
+
+// ---- Save payout bank details ----
+app.post('/api/payout-details', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req.headers.authorization);
+    if (!user || !user.id) return res.status(401).json({ error: 'Not authenticated' });
+
+    const { accountHolderName, sortCode, accountNumberLast4, payoutEmail } = req.body;
+    await supabase.from('payout_details').upsert({
+      user_id: user.id,
+      account_holder_name: accountHolderName,
+      sort_code: sortCode,
+      account_number_last4: accountNumberLast4,
+      payout_email: payoutEmail,
+      updated_at: new Date().toISOString()
+    });
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`💳 Payments API listening on port ${PORT}`));
 
 async function main() {
   console.log('🏌️  The Field — Scraper v5');
