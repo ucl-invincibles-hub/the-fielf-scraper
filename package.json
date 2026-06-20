@@ -1,14 +1,15 @@
 {
   "name": "the-field-scraper",
   "version": "1.0.0",
-  "description": "Live scoring scraper for The Field Fantasy Golf",
-  "main": "scraper.js",
+  "description": "The Field Fantasy Golf — live scoring scraper and payments API",
+  "main": "scraper_v5.js",
   "scripts": {
-    "start": "node scraper.js",
-    "dev": "node scraper.js"
+    "start": "node scraper_v5.js"
   },
   "dependencies": {
-    "node-fetch": "2.6.9",
-    "@supabase/supabase-js": "^2.0.0"
+    "@supabase/supabase-js": "^2.45.0",
+    "node-fetch": "^2.7.0",
+    "express": "^4.19.2",
+    "stripe": "^16.2.0"
   }
 }
