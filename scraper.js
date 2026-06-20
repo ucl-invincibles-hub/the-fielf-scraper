@@ -762,6 +762,72 @@ app.post('/api/payout-details', async (req, res) => {
   }
 });
 
+// ---- Admin: who's owed payouts ----
+const ADMIN_EMAIL = 'tjslondonlimited@gmail.com';
+async function requireAdmin(req) {
+  const user = await getUserFromToken(req.headers.authorization);
+  if (!user || !user.email || user.email.toLowerCase() !== ADMIN_EMAIL.toLowerCase()) return null;
+  return user;
+}
+
+app.get('/api/admin/payouts', async (req, res) => {
+  try {
+    const admin = await requireAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Not authorized' });
+
+    const { data: entries, error: entriesErr } = await supabase
+      .from('sweepstake_entries')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (entriesErr) throw entriesErr;
+
+    const { data: payoutDetails, error: pdErr } = await supabase
+      .from('payout_details')
+      .select('*');
+    if (pdErr) throw pdErr;
+
+    const { data: users, error: usersErr } = await supabase.auth.admin.listUsers();
+    if (usersErr) throw usersErr;
+
+    const pdByUser = {};
+    (payoutDetails || []).forEach(pd => { pdByUser[pd.user_id] = pd; });
+    const emailByUser = {};
+    (users && users.users ? users.users : []).forEach(u => { emailByUser[u.id] = u.email; });
+
+    const enriched = (entries || []).map(e => ({
+      ...e,
+      user_email: emailByUser[e.user_id] || null,
+      payout_details: pdByUser[e.user_id] || null
+    }));
+
+    res.json({ entries: enriched });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/admin/mark-paid', async (req, res) => {
+  try {
+    const admin = await requireAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Not authorized' });
+
+    const { entryId, payoutReference } = req.body;
+    if (!entryId) return res.status(400).json({ error: 'Missing entryId' });
+
+    const { error } = await supabase.from('sweepstake_entries').update({
+      payout_status: 'paid',
+      payout_method: 'bank_transfer',
+      payout_reference: payoutReference || null,
+      paid_out_at: new Date().toISOString()
+    }).eq('id', entryId);
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`💳 Payments API listening on port ${PORT}`));
 
