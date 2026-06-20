@@ -451,7 +451,7 @@ async function sendWelcomeEmail(email, teamName) {
   </div>
   <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(200,168,48,0.2);border-radius:8px;padding:24px;margin-bottom:24px">
     <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:#c8a830;text-transform:uppercase;margin-bottom:16px">How it works</div>
-    <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0 0 10px"><strong style="color:#f0f0f0">1. Pick 7 golfers</strong> from the PGA Tour and LIV Golf within a £50m budget. Mix the world number one with a LIV dark horse. The bold call wins leagues.</p>
+    <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0 0 10px"><strong style="color:#f0f0f0">1. Pick 6 golfers</strong> from the PGA Tour and LIV Golf within a £50m budget. Mix the world number one with a LIV dark horse. The bold call wins leagues.</p>
     <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0 0 10px"><strong style="color:#f0f0f0">2. Name your Captain (2×) and Vice Captain (1.5×).</strong> Back the right man and the points stack up fast. Back the wrong one and the group chat will remind you. Repeatedly.</p>
     <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0 0 10px"><strong style="color:#f0f0f0">3. Use your chips wisely.</strong> Triple Captain, Vice, Mulligan, Full Bag — one shot at each, all season. Use them well and you look like a genius. Use them badly and, well, see point 2.</p>
     <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0"><strong style="color:#f0f0f0">4. Compete all season</strong> in private leagues, a global leaderboard, and a weekly sweepstake where the pot is entirely in your hands.</p>
