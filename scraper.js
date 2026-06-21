@@ -129,15 +129,22 @@ async function fetchPGA() {
         // If still 999, try sorting by score later
       }
 
-      const thru = c.status?.thru || c.status?.period || 0;
+      // ESPN's golf API does not reliably expose a flat status.thru field.
+      // The real hole-progress data lives nested inside linescores: each
+      // competitor.linescores[] entry is one ROUND (period 1-4), and each of
+      // those has its own nested .linescores[] array of individual holes
+      // played so far. The length of that nested array for the player's
+      // current round IS the accurate "holes completed" count.
+      const linescores = c.linescores || [];
+      const currentRoundLine = linescores.find(ls => ls.period === round);
+      const thru = currentRoundLine?.linescores?.length || 0;
       // Debug first player to see raw structure
-      if (players.length === 0) console.log('ESPN competitor status sample:', JSON.stringify(c.status));
+      if (players.length === 0) console.log('ESPN competitor status sample:', JSON.stringify(c.status), '| thru calc:', thru);
       const totalScore = parseInt(c.score) || 0; // cumulative vs par
 
-      // Current round score from linescores
-      const linescores = c.linescores || [];
-      const roundScore = linescores.length > 0 ?
-        parseInt(linescores[linescores.length - 1]?.value || 0) || 0 : 0;
+      // Current round score (raw strokes) from the matched round's linescore entry
+      const roundScore = currentRoundLine ?
+        parseInt(currentRoundLine?.value || 0) || 0 : 0;
 
       // Rounds played — treat current in-progress round as counting if player has a score
       const roundsPlayed = isComplete ? round : (totalScore !== 0 || thru > 0 ? round : Math.max(0, round - 1));
@@ -234,10 +241,15 @@ async function fetchLIV() {
       const totalScore = parseInt(c.score) || 0;
       const strokePts = estimateStrokePoints(totalScore, round);
       const finishPts = isBottom27 ? -10 : (isComplete ? calcFinishPoints(posNum, 'standard') : 0);
+      // Same fix as PGA: derive thru from the nested hole-by-hole linescores
+      // array for the current round rather than a non-existent status.thru field.
+      const linescores = c.linescores || [];
+      const currentRoundLine = linescores.find(ls => ls.period === round);
+      const thru = currentRoundLine?.linescores?.length || 0;
       return {
         player_name: c.athlete?.displayName || 'Unknown',
         tour: 'LIV', tournament_name: tournamentName, tournament_type: 'standard',
-        round, position: posStr, thru: c.status?.thru || 0,
+        round, position: posStr, thru,
         total_score: totalScore, round_score: 0,
         birdies: 0, eagles: 0, bogeys: 0, doubles_or_worse: 0,
         stroke_points: strokePts, finish_points: finishPts,
