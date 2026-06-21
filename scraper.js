@@ -152,8 +152,14 @@ async function fetchPGA() {
       // Stroke points estimated from total score
       const strokePts = estimateStrokePoints(totalScore, roundsPlayed);
 
-      // Finish points only when tournament complete
-      const finishPts = isCut ? -10 : (isComplete ? calcFinishPoints(posNum, tournamentType) : 0);
+      // Finish points only when the TOURNAMENT is complete, not just a round.
+      // ESPN's competition.status.type.completed flag has been observed to
+      // flicker true briefly between rounds (e.g. right as Saturday's round
+      // wraps before Sunday's tee times begin), which would otherwise let a
+      // 2-minute scrape lock in a player's mid-tournament position as if it
+      // were their final result. Standard stroke-play majors/PGA events run
+      // 4 rounds, so require round >= 4 as well before honoring "complete".
+      const finishPts = isCut ? -10 : (isComplete && round >= 4 ? calcFinishPoints(posNum, tournamentType) : 0);
       const totalPts = strokePts + finishPts;
 
       players.push({
@@ -202,7 +208,7 @@ async function fetchPGA() {
         }
         // Recalculate finish pts with new position
         const pn = parseInt(players[i].position.replace(/[^0-9]/g,'')) || 999;
-        const fp = isComplete ? calcFinishPoints(pn, tournamentType) : 0;
+        const fp = (isComplete && round >= 4) ? calcFinishPoints(pn, tournamentType) : 0;
         players[i].finish_points = fp;
         players[i].total_points = players[i].stroke_points + fp;
       }
@@ -240,7 +246,9 @@ async function fetchLIV() {
       const isBottom27 = posNum > 27;
       const totalScore = parseInt(c.score) || 0;
       const strokePts = estimateStrokePoints(totalScore, round);
-      const finishPts = isBottom27 ? -10 : (isComplete ? calcFinishPoints(posNum, 'standard') : 0);
+      // Same guard as PGA: LIV events are 54-hole (3 rounds), so only honor
+      // a "completed" flag once we're actually on/past the final round.
+      const finishPts = isBottom27 ? -10 : (isComplete && round >= 3 ? calcFinishPoints(posNum, 'standard') : 0);
       // Same fix as PGA: derive thru from the nested hole-by-hole linescores
       // array for the current round rather than a non-existent status.thru field.
       const linescores = c.linescores || [];
