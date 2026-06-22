@@ -274,17 +274,22 @@ async function fetchLIV() {
 async function writeScores(players) {
   if (!players?.length) return;
   
-  // Check if tournament has changed — if so clear old data first
   const newTournament = players[0]?.tournament_name;
-  if (newTournament) {
+  const tour = players[0]?.tour; // 'PGA' or 'LIV'
+  
+  if (newTournament && tour) {
+    // Only check/clear old data for THIS tour — never let PGA writes clear LIV data or vice versa
     const { data: existing } = await supabase
       .from('live_scores')
       .select('tournament_name')
+      .eq('tour', tour)
       .limit(1);
     const oldTournament = existing?.[0]?.tournament_name;
     if (oldTournament && oldTournament !== newTournament) {
-      console.log(`🔄 New tournament detected: ${newTournament} (was ${oldTournament}) — clearing old data`);
-      await supabase.from('live_scores').delete().eq('tournament_name', oldTournament);
+      console.log(`🔄 New ${tour} tournament: ${newTournament} (was ${oldTournament}) — clearing old ${tour} data`);
+      await supabase.from('live_scores').delete()
+        .eq('tournament_name', oldTournament)
+        .eq('tour', tour);
       await bankTransfers(oldTournament);
     }
   }
@@ -292,7 +297,7 @@ async function writeScores(players) {
   const { error } = await supabase.from('live_scores')
     .upsert(players, { onConflict: 'player_name,tournament_name' });
   if (error) console.error('Supabase error:', error.message);
-  else console.log(`✅ Wrote ${players.length} players`);
+  else console.log(`✅ Wrote ${players.length} ${tour||''} players`);
 }
 
 async function checkSchema() {
@@ -664,6 +669,123 @@ app.post('/api/sweepstake/checkout', async (req, res) => {
 });
 
 // ---- PRIVATE SWEEPSTAKE: Create Checkout Session ----
+// ---- Private Sweepstake: Create ----
+app.post('/api/private-sweepstake/create', async (req, res) => {
+  try {
+    if (!stripe) return res.status(503).json({ error: 'Payments not configured' });
+    const enabled = await paymentsEnabled();
+    if (!enabled) return res.status(403).json({ error: 'Payments are not yet enabled' });
+
+    const user = await getUserFromToken(req.headers.authorization);
+    if (!user || !user.id) return res.status(401).json({ error: 'Not authenticated' });
+
+    const { stakeAmountPence, tournamentName, gameweek } = req.body;
+    if (!stakeAmountPence || stakeAmountPence < 100) {
+      return res.status(400).json({ error: 'Minimum stake is £1' });
+    }
+    if (stakeAmountPence > 1000000) {
+      return res.status(400).json({ error: 'Maximum stake is £10,000' });
+    }
+
+    // Generate a unique 6-char invite code
+    const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+
+    // Insert the sweepstake record
+    const { data: sweep, error: insertErr } = await supabase.from('private_sweepstakes').insert({
+      created_by: user.id,
+      code,
+      stake_amount_pence: stakeAmountPence,
+      tournament_name: tournamentName || gameweek || 'This Week',
+      gameweek: gameweek || '',
+      status: 'open',
+      total_pot_pence: 0
+    }).select().single();
+
+    if (insertErr) throw new Error(insertErr.message);
+
+    // Creator immediately goes to Stripe checkout to pay their own entry
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'gbp',
+          product_data: { name: `The Field — Private Sweepstake · ${tournamentName || 'This Week'} · £${(stakeAmountPence / 100).toFixed(stakeAmountPence % 100 === 0 ? 0 : 2)} stake` },
+          unit_amount: stakeAmountPence
+        },
+        quantity: 1
+      }],
+      metadata: { user_id: user.id, type: 'private_sweepstake', sweepstake_id: sweep.id },
+      success_url: 'https://thefieldfantasygolf.com/?payment=success&sweep_code=' + code,
+      cancel_url: 'https://thefieldfantasygolf.com/?payment=cancelled'
+    });
+
+    // Pre-insert pending entry for creator
+    await supabase.from('private_sweepstake_entries').insert({
+      sweepstake_id: sweep.id,
+      user_id: user.id,
+      stripe_session_id: session.id,
+      payment_status: 'pending'
+    });
+
+    res.json({ url: session.url, code, sweepstakeId: sweep.id });
+  } catch(e) {
+    console.log('private sweepstake create error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---- Private Sweepstake: Get mine (for this week's entries panel) ----
+app.get('/api/private-sweepstake/my', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req.headers.authorization);
+    if (!user || !user.id) return res.status(401).json({ error: 'Not authenticated' });
+
+    // Sweepstakes I created
+    const { data: created } = await supabase.from('private_sweepstakes')
+      .select('id, code, stake_amount_pence, tournament_name, status, total_pot_pence')
+      .eq('created_by', user.id)
+      .eq('status', 'open')
+      .order('created_at', { ascending: false });
+
+    // Sweepstakes I've entered (paid) but didn't create
+    const { data: entered } = await supabase.from('private_sweepstake_entries')
+      .select('sweepstake_id, private_sweepstakes(id, code, stake_amount_pence, tournament_name, status, total_pot_pence)')
+      .eq('user_id', user.id)
+      .eq('payment_status', 'paid');
+
+    const myEntries = (entered || []).map(function(e) { return e.private_sweepstakes; })
+      .filter(function(s) { return s && s.status === 'open'; });
+
+    // Dedupe (creator who already paid is in both)
+    const seen = {};
+    const all = [...(created || []), ...myEntries].filter(function(s) {
+      if (!s || seen[s.id]) return false;
+      seen[s.id] = true;
+      return true;
+    });
+
+    res.json({ sweepstakes: all });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---- Private Sweepstake: Join by code (lookup) ----
+app.get('/api/private-sweepstake/lookup/:code', async (req, res) => {
+  try {
+    const { data: sweep } = await supabase.from('private_sweepstakes')
+      .select('id, code, stake_amount_pence, tournament_name, status, total_pot_pence')
+      .eq('code', req.params.code.toUpperCase())
+      .eq('status', 'open')
+      .single();
+    if (!sweep) return res.status(404).json({ error: 'Sweepstake not found or closed' });
+    res.json({ sweep });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/private-sweepstake/checkout', async (req, res) => {
   try {
     if (!stripe) return res.status(503).json({ error: 'Payments not configured' });
