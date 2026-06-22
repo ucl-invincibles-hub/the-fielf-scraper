@@ -47,22 +47,99 @@ function calcFinishPoints(posNum, type) {
 
 // Estimate stroke points from cumulative score vs par
 // We know total_score (e.g. -10 means 10 under) but not individual holes
-// Use average round scoring as a proxy:
-// Each round of golf has ~18 holes - distribute score across rounds played
-// This is an approximation until we get hole-by-hole data
+// ═══════════════════════════════════════════════════════════
+// HOLE-BY-HOLE STROKE POINT CALCULATOR
+// Replaces the old estimateStrokePoints() approximation.
 //
-// New scoring scale: Birdie +4, Eagle +8, Bogey -2, Double -4
-// Under-par blend (mostly birdies, some eagles): ~3.7 pts per shot under par
-// Over-par blend (mostly bogeys, some doubles): ~-3.0 pts per shot over par
-function estimateStrokePoints(totalScore, roundsPlayed) {
-  const score = parseInt(totalScore) || 0;
+// ESPN's competitor.linescores[] structure:
+//   [ { period: 1, value: "-4", linescores: [ { value: "3" }, ... ] },
+//     { period: 2, value: "-2", linescores: [ ... ] }, ... ]
+//
+// Each nested linescore entry is ONE HOLE, value = raw strokes taken.
+// We need the par for each hole — ESPN includes it in competition.situation
+// or course data, but not directly on each hole score. Instead, the value
+// field on competitor linescores is "strokes - par" already (i.e. -1=birdie).
+// In practice ESPN exposes TWO formats:
+//   Format A: value = strokes relative to par ("-1", "E", "+1")
+//   Format B: value = raw strokes ("4", "3", "5")
+// We detect Format B by checking if the value is a large integer (>3 for most holes).
+// For Format A, we parse directly. Format B requires par data we may not have.
+//
+// Strategy: try to parse as relative-to-par first (format A), fall back to
+// the round-level value which IS always relative to par, distributing it
+// evenly if we can't parse hole-by-hole.
+// ═══════════════════════════════════════════════════════════
+
+const HOLE_SCORE_POINTS = {
+  '-3': 20,  // albatross / double eagle
+  '-2': 8,   // eagle
+  '-1': 4,   // birdie
+  '0':  0,   // par
+  '1':  -2,  // bogey
+  '2':  -4,  // double bogey
+  '3':  -8,  // triple+
+};
+
+function pointsForHole(relToPar) {
+  const k = String(Math.max(-3, Math.min(3, parseInt(relToPar) || 0)));
+  return HOLE_SCORE_POINTS[k] !== undefined ? HOLE_SCORE_POINTS[k] : (parseInt(k) <= -3 ? 20 : -8);
+}
+
+function calcStrokePointsFromLinescores(linescores, totalScore, roundsPlayed) {
+  // Try to use actual hole-by-hole data from all rounds
+  let totalPts = 0;
+  let holesProcessed = 0;
+
+  for (const roundLine of linescores) {
+    const holes = roundLine?.linescores || [];
+    if (!holes.length) continue;
+
+    // Try to determine if values are relative-to-par or raw strokes
+    // Clue: relative-to-par values are typically -3 to +3; raw strokes are 2-10
+    const sampleVal = parseInt(holes[0]?.value || '0');
+    const looksRelative = Math.abs(sampleVal) <= 3;
+
+    if (looksRelative) {
+      // Format A: direct relative-to-par scoring
+      for (const hole of holes) {
+        const rel = parseInt(hole.value || '0');
+        if (!isNaN(rel)) {
+          totalPts += pointsForHole(rel);
+          holesProcessed++;
+        }
+      }
+    } else {
+      // Format B: raw strokes — we don't have par per hole, so fall back
+      // to the round-level relative score and distribute it as best guess
+      const roundRel = parseInt(roundLine.value || '0');
+      if (!isNaN(roundRel)) {
+        totalPts += estimateFromRoundScore(roundRel);
+        holesProcessed += holes.length;
+      }
+    }
+  }
+
+  // If we got nothing useful, fall back to total score estimate
+  if (holesProcessed === 0) {
+    return estimateFromRoundScore(parseInt(totalScore) || 0);
+  }
+  return totalPts;
+}
+
+// Fallback: distribute a round score into likely hole outcomes
+// Under par: weighted birdie/eagle mix. Over par: weighted bogey/double mix.
+function estimateFromRoundScore(score) {
   if (score === 0) return 0;
   if (score < 0) {
-    // Assume all shots under par are birdies: -1 = +4pts
-    return Math.abs(score) * 4;
+    // ~85% birdies (+4), ~15% eagles (+8) on a good round
+    const eagles = Math.round(Math.abs(score) * 0.1);
+    const birdies = Math.abs(score) - eagles;
+    return eagles * 8 + birdies * 4;
   } else {
-    // Assume all shots over par are bogeys: +1 = -2pts
-    return score * -2;
+    // ~70% bogeys (-2), ~30% doubles (-4) on a bad round
+    const doubles = Math.round(score * 0.25);
+    const bogeys = score - doubles;
+    return bogeys * -2 + doubles * -4;
   }
 }
 
@@ -163,7 +240,12 @@ async function fetchPGA() {
       const currentRoundLine = linescores.find(ls => ls.period === round);
       const thru = currentRoundLine?.linescores?.length || 0;
       // Debug first player to see raw structure
-      if (players.length === 0) console.log('ESPN competitor status sample:', JSON.stringify(c.status), '| thru calc:', thru);
+      if (players.length === 0) {
+        const sampleHoles = linescores[0]?.linescores || [];
+        const sampleVal = parseInt(sampleHoles[0]?.value || '99');
+        const mode = Math.abs(sampleVal) <= 3 ? '✅ REAL hole-by-hole' : '⚠️ ESTIMATED (raw strokes)';
+        console.log('ESPN scoring mode:', mode, '| first hole value:', sampleHoles[0]?.value, '| thru:', thru);
+      }
       const totalScore = parseInt(c.score) || 0; // cumulative vs par
 
       // Current round score (raw strokes) from the matched round's linescore entry
@@ -173,8 +255,25 @@ async function fetchPGA() {
       // Rounds played — treat current in-progress round as counting if player has a score
       const roundsPlayed = isComplete ? round : (totalScore !== 0 || thru > 0 ? round : Math.max(0, round - 1));
 
-      // Stroke points estimated from total score
-      const strokePts = estimateStrokePoints(totalScore, roundsPlayed);
+      // Stroke points from real hole-by-hole data (falls back to estimate if unavailable)
+      const strokePts = calcStrokePointsFromLinescores(linescores, totalScore, roundsPlayed);
+
+      // Count actual birdies/eagles/bogeys from hole data for the DB record
+      let birdies = 0, eagles = 0, bogeys = 0, doubles = 0;
+      for (const roundLine of linescores) {
+        const holes = roundLine?.linescores || [];
+        const sampleVal = parseInt(holes[0]?.value || '99');
+        const looksRelative = Math.abs(sampleVal) <= 3;
+        if (looksRelative) {
+          for (const hole of holes) {
+            const rel = parseInt(hole.value || '0');
+            if (rel <= -2) eagles++;
+            else if (rel === -1) birdies++;
+            else if (rel === 1) bogeys++;
+            else if (rel >= 2) doubles++;
+          }
+        }
+      }
 
       // Finish points only when the TOURNAMENT is complete, not just a round.
       // ESPN's competition.status.type.completed flag has been observed to
@@ -196,8 +295,10 @@ async function fetchPGA() {
         thru,
         total_score: totalScore,
         round_score: roundScore,
-        birdies: 0,
-        eagles: 0,
+        birdies,
+        eagles,
+        bogeys,
+        doubles_or_worse: doubles,
         bogeys: 0,
         doubles_or_worse: 0,
         stroke_points: strokePts,
