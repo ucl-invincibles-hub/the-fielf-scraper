@@ -86,43 +86,38 @@ function pointsForHole(relToPar) {
 }
 
 function calcStrokePointsFromLinescores(linescores, totalScore, roundsPlayed) {
-  // Try to use actual hole-by-hole data from all rounds
+  // ESPN hole-level data can be raw strokes (3,4,5) OR relative-to-par (-1,0,1).
+  // Raw strokes are NEVER negative. Relative-to-par WILL have negatives for birdies/eagles.
+  // So: if we see any negative hole values → Format A (relative), parse hole-by-hole.
+  // Otherwise → Format B (raw strokes), fall back to round-level relative score.
   let totalPts = 0;
-  let holesProcessed = 0;
+  let roundsFound = 0;
 
   for (const roundLine of linescores) {
     const holes = roundLine?.linescores || [];
     if (!holes.length) continue;
 
-    // Try to determine if values are relative-to-par or raw strokes
-    // Clue: relative-to-par values are typically -3 to +3; raw strokes are 2-10
-    const sampleVal = parseInt(holes[0]?.value || '0');
-    const looksRelative = Math.abs(sampleVal) <= 3;
+    const hasNegatives = holes.some(h => parseInt(h.value || '0') < 0);
 
-    if (looksRelative) {
-      // Format A: direct relative-to-par scoring
+    if (hasNegatives) {
+      // Format A confirmed — parse actual hole-by-hole relative scores
       for (const hole of holes) {
         const rel = parseInt(hole.value || '0');
-        if (!isNaN(rel)) {
-          totalPts += pointsForHole(rel);
-          holesProcessed++;
-        }
+        if (!isNaN(rel)) totalPts += pointsForHole(rel);
       }
+      roundsFound++;
     } else {
-      // Format B: raw strokes — we don't have par per hole, so fall back
-      // to the round-level relative score and distribute it as best guess
+      // Format B (raw strokes) — use round-level relative score which IS reliable
       const roundRel = parseInt(roundLine.value || '0');
       if (!isNaN(roundRel)) {
         totalPts += estimateFromRoundScore(roundRel);
-        holesProcessed += holes.length;
+        roundsFound++;
       }
     }
   }
 
-  // If we got nothing useful, fall back to total score estimate
-  if (holesProcessed === 0) {
-    return estimateFromRoundScore(parseInt(totalScore) || 0);
-  }
+  // Nothing useful — fall back to total score estimate
+  if (roundsFound === 0) return estimateFromRoundScore(parseInt(totalScore) || 0);
   return totalPts;
 }
 
@@ -262,9 +257,8 @@ async function fetchPGA() {
       let birdies = 0, eagles = 0, bogeys = 0, doubles = 0;
       for (const roundLine of linescores) {
         const holes = roundLine?.linescores || [];
-        const sampleVal = parseInt(holes[0]?.value || '99');
-        const looksRelative = Math.abs(sampleVal) <= 3;
-        if (looksRelative) {
+        const hasNegatives = holes.some(h => parseInt(h.value || '0') < 0);
+        if (hasNegatives) {
           for (const hole of holes) {
             const rel = parseInt(hole.value || '0');
             if (rel <= -2) eagles++;
