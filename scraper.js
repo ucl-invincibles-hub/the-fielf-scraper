@@ -291,6 +291,10 @@ async function writeScores(players) {
         .eq('tournament_name', oldTournament)
         .eq('tour', tour);
       await bankTransfers(oldTournament);
+      // Check if the completed tournament is a major for the price multiplier
+      const MAJORS = ['Masters Tournament', 'PGA Championship', 'U.S. Open', 'The Open'];
+      const isMajor = MAJORS.some(m => oldTournament.includes(m));
+      await updatePrices(oldTournament, isMajor);
     }
   }
 
@@ -573,6 +577,110 @@ async function bankTransfers(completedGameweek) {
     }
     console.log(`✅ Transfer banking complete for ${completedGameweek}`);
   } catch(e) { console.log('bankTransfers error:', e.message); }
+}
+
+// ════════════════════════════════════════════════
+// DYNAMIC PRICING
+// Runs after each tournament completes.
+// Price changes are applied to the players table
+// and take effect immediately for the next gameweek.
+//
+// RISES (capped only by floor, no upper ceiling):
+//   Major win:      +£0.5m
+//   Tournament win: +£0.2m
+//   Top 5:          +£0.1m
+//
+// DROPS:
+//   Missed cut / LIV bottom 27: −£0.1m
+//   Two consecutive missed cuts: −£0.2m total
+//
+// FLOOR: £4.0m (nobody goes below)
+// CEILING: None — Scheffler can keep rising.
+//
+// Sell price: players always sell at their CURRENT
+// market price, so managers who hold rising players
+// profit in transfer budget when they sell.
+// ════════════════════════════════════════════════
+async function updatePrices(completedTournamentName, isMajor = false) {
+  try {
+    console.log(`💰 Updating prices after: ${completedTournamentName} (major: ${isMajor})`);
+
+    // Fetch final results for this tournament (round 4 or final LIV round)
+    const { data: scores, error: scErr } = await supabase
+      .from('live_scores')
+      .select('player_name, position, status, round, tour')
+      .eq('tournament_name', completedTournamentName);
+
+    if (scErr || !scores?.length) {
+      console.log('updatePrices: no scores found for', completedTournamentName);
+      return;
+    }
+
+    // Dedupe to one row per player (latest round)
+    const byPlayer = {};
+    scores.forEach(s => {
+      if (!byPlayer[s.player_name] || s.round > byPlayer[s.player_name].round) {
+        byPlayer[s.player_name] = s;
+      }
+    });
+
+    // Fetch current player prices
+    const { data: players } = await supabase
+      .from('players')
+      .select('id, name, price')
+      .eq('is_active', true);
+    if (!players?.length) return;
+
+    const priceByName = {};
+    players.forEach(p => { priceByName[p.name] = { id: p.id, price: parseFloat(p.price) }; });
+
+    const FLOOR = 4.0;
+    const updates = [];
+
+    Object.values(byPlayer).forEach(row => {
+      const player = priceByName[row.player_name];
+      if (!player) return;
+
+      const pos = parseInt(row.position) || 999;
+      const isCut = row.status === 'cut' || row.status === 'bottom27';
+      let delta = 0;
+
+      if (isCut) {
+        delta = -0.1;
+      } else if (pos === 1) {
+        delta = isMajor ? 0.5 : 0.2;
+      } else if (pos <= 5) {
+        delta = 0.1;
+      }
+      // pos 6-10 and beyond: no change this week (keeps pricing movements meaningful)
+
+      if (delta !== 0) {
+        const newPrice = Math.max(FLOOR, Math.round((player.price + delta) * 10) / 10);
+        if (newPrice !== player.price) {
+          updates.push({ id: player.id, name: row.player_name, oldPrice: player.price, newPrice });
+        }
+      }
+    });
+
+    if (!updates.length) { console.log('updatePrices: no price changes this week'); return; }
+
+    // Apply updates one at a time to log clearly
+    for (const u of updates) {
+      const { error } = await supabase.from('players')
+        .update({ price: u.newPrice })
+        .eq('id', u.id);
+      if (error) {
+        console.error(`updatePrices: error updating ${u.name}:`, error.message);
+      } else {
+        const dir = u.newPrice > u.oldPrice ? '↑' : '↓';
+        console.log(`${dir} ${u.name}: £${u.oldPrice}m → £${u.newPrice}m`);
+      }
+    }
+
+    console.log(`✅ Price update complete — ${updates.length} player(s) changed`);
+  } catch(e) {
+    console.log('updatePrices error:', e.message);
+  }
 }
 
 async function getBankedTransfers(userId) {
