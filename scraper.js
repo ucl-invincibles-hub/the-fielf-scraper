@@ -82,19 +82,43 @@ async function fetchPGA() {
     const competition = event.competitions?.[0];
     if (!competition) return null;
 
-    // Write tournament info including start time for deadline calculation
+    // Write tournament info with real tee-time based transfer window
     try {
-      const startDate = event.date || competition.date || null;
+      const startDate = event.date || competition.date || null;  // Thursday first tee time (UTC)
+      const endDate = event.endDate || null;                     // Sunday finish estimate (UTC)
       const venue = event.venues?.[0]?.fullName || competition.venue?.fullName || null;
+
+      // Transfer window logic:
+      //   OPEN:   1 hour after tournament ends (endDate + 1hr)  → managers can react to results
+      //   LOCKED: 1 hour before first tee time (startDate - 1hr) → locks before play begins
+      // If endDate missing, fall back: open = startDate - 5 days (previous Sunday 8pm-ish)
+      let transferOpenAt = null;
+      let transferLockAt = null;
+      if (startDate) {
+        const teeTime = new Date(startDate);
+        transferLockAt = new Date(teeTime.getTime() - 60 * 60 * 1000).toISOString(); // -1hr from Thursday
+        if (endDate) {
+          const finish = new Date(endDate);
+          transferOpenAt = new Date(finish.getTime() + 60 * 60 * 1000).toISOString(); // +1hr after Sunday
+        } else {
+          // No endDate — estimate: open 5 days before Thursday (previous Sunday evening)
+          transferOpenAt = new Date(teeTime.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString();
+        }
+      }
+
       await supabase.from('tournament_info').upsert({
         id: 1,
         tournament_name: tournamentName,
         course: venue,
         first_tee_time: startDate,
-        deadline: startDate ? new Date(new Date(startDate).getTime() - 60*60*1000).toISOString() : null,
+        deadline: transferLockAt || (startDate ? new Date(new Date(startDate).getTime() - 60*60*1000).toISOString() : null),
+        transfer_open_at: transferOpenAt,
+        transfer_lock_at: transferLockAt,
         round: parseInt(competition.status?.period || 1),
         updated_at: new Date().toISOString()
       }, { onConflict: 'id' });
+
+      console.log(`🗓️  Transfer window: opens ${transferOpenAt ? new Date(transferOpenAt).toUTCString() : 'unknown'} | locks ${transferLockAt ? new Date(transferLockAt).toUTCString() : 'unknown'}`);
     } catch(e) { console.log('tournament_info write error:', e.message); }
 
     const round = parseInt(competition.status?.period || 1);
