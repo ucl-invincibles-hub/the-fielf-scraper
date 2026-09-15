@@ -1,6 +1,6 @@
-// THE FIELD — Live Scoring Scraper v5
+// THE FIELD — Live Scoring Scraper v6 (PGA-only, LIV removed Sept 2026)
 // Updated scoring table (June 2026): all values even so VC x1.5 never produces a fraction
-// Major win +42 (1.5x of +28) · Tournament win +28 · 2nd +20 · 3rd +14 · Top5 +10 · Top10 +6 · Top20 +2 · Missed cut/bottom27 -10
+// Major win +42 (1.5x of +28) · Tournament win +28 · 2nd +20 · 3rd +14 · Top5 +10 · Top10 +6 · Top20 +2 · Missed cut -10
 // Hole in one +20 · Eagle +8 · Birdie +4 · Par 0 · Bogey -2 · Double -4 · Triple -6 · Blob -8
 // Signature event multiplier removed — only Major events carry a multiplier (1.5x)
 
@@ -253,61 +253,13 @@ async function fetchPGA() {
   }
 }
 
-async function fetchLIV() {
-  try {
-    const url = 'https://site.api.espn.com/apis/site/v2/sports/golf/liv/scoreboard';
-    const res = await fetch(url, { timeout: 15000 });
-    if (!res.ok) { console.log('LIV: No active event'); return null; }
-    const data = await res.json();
-    const events = data.events || [];
-    if (!events.length) { console.log('LIV: No active event'); return null; }
-    const event = events[0];
-    const competition = event.competitions?.[0];
-    if (!competition) return null;
-    const round = parseInt(competition.status?.period || 3);
-    const isComplete = competition.status?.type?.completed || false;
-    const tournamentName = event.name || 'LIV Event';
-    const competitors = competition.competitors || [];
-
-    const players = competitors.map((c, idx) => {
-      const posStr = c.status?.position?.displayName || c.status?.displayValue || String(idx+1);
-      const posNum = parseInt(posStr.replace(/[^0-9]/g,'')) || idx+1;
-      const isBottom27 = posNum > 27;
-      const totalScore = parseInt(c.score) || 0;
-      const strokePts = estimateStrokePoints(totalScore, round);
-      // Same guard as PGA: LIV events are 54-hole (3 rounds), so only honor
-      // a "completed" flag once we're actually on/past the final round.
-      const finishPts = isBottom27 ? -10 : (isComplete && round >= 3 ? calcFinishPoints(posNum, 'standard') : 0);
-      // Same fix as PGA: derive thru from the nested hole-by-hole linescores
-      // array for the current round rather than a non-existent status.thru field.
-      const linescores = c.linescores || [];
-      const currentRoundLine = linescores.find(ls => ls.period === round);
-      const thru = currentRoundLine?.linescores?.length || 0;
-      return {
-        player_name: c.athlete?.displayName || 'Unknown',
-        tour: 'LIV', tournament_name: tournamentName, tournament_type: 'standard',
-        round, position: posStr, thru,
-        total_score: totalScore, round_score: 0,
-        birdies: 0, eagles: 0, bogeys: 0, doubles_or_worse: 0,
-        stroke_points: strokePts, finish_points: finishPts,
-        total_points: strokePts + finishPts,
-        status: isBottom27 ? 'bottom27' : 'active',
-        updated_at: new Date().toISOString()
-      };
-    });
-    console.log(`LIV: ${players.length} players | ${tournamentName}`);
-    return { players };
-  } catch(e) { console.log('LIV: No active event'); return null; }
-}
-
 async function writeScores(players) {
   if (!players?.length) return;
   
   const newTournament = players[0]?.tournament_name;
-  const tour = players[0]?.tour; // 'PGA' or 'LIV'
+  const tour = players[0]?.tour; // 'PGA'
   
   if (newTournament && tour) {
-    // Only check/clear old data for THIS tour — never let PGA writes clear LIV data or vice versa
     const { data: existing } = await supabase
       .from('live_scores')
       .select('tournament_name')
@@ -344,8 +296,6 @@ async function scrape() {
   const pga = await fetchPGA();
   if (pga?.players?.length) await writeScores(pga.players);
   else console.log('PGA: No data');
-  const liv = await fetchLIV();
-  if (liv?.players?.length) await writeScores(liv.players);
 }
 
 // ═══════════ STEP 4: GLOBAL RANKINGS ═══════════
@@ -510,12 +460,12 @@ async function sendWelcomeEmail(email, teamName) {
   <p style="font-size:14px;color:#c8d8c8;line-height:1.9;margin:0 0 20px">Your Captain earns double points. Which also means when he makes a blob on the par 5 — you'll feel it. That's the beauty of it.</p>
   <div style="background:rgba(200,168,48,0.06);border:1px solid rgba(200,168,48,0.2);border-radius:8px;padding:20px;margin-bottom:28px;text-align:center">
     <p style="font-family:Georgia,serif;font-size:14px;color:#c8d8c8;font-style:italic;line-height:1.8;margin:0 0 12px">"Golf has always been played in 4-balls. Saturday morning. Four players. A small wager. Eighteen holes. Settle up at the 19th over a pint.</p>
-    <p style="font-family:Georgia,serif;font-size:14px;color:#c8d8c8;font-style:italic;line-height:1.8;margin:0 0 12px">The Field is that — but all season long, across the PGA Tour and LIV Golf, with a prize at the end worth a lot more than a round of drinks."</p>
+    <p style="font-family:Georgia,serif;font-size:14px;color:#c8d8c8;font-style:italic;line-height:1.8;margin:0 0 12px">The Field is that — but all season long, across the PGA Tour, with a prize at the end worth a lot more than a round of drinks."</p>
     <p style="font-family:Georgia,serif;font-size:14px;color:#c8a830;font-weight:700;margin:0">Pick your 4-ball. Name your captain. Let them play.</p>
   </div>
   <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(200,168,48,0.2);border-radius:8px;padding:24px;margin-bottom:24px">
     <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:#c8a830;text-transform:uppercase;margin-bottom:16px">How it works</div>
-    <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0 0 10px"><strong style="color:#f0f0f0">1. Pick 6 golfers</strong> from the PGA Tour and LIV Golf within a £50m budget. Mix the world number one with a LIV dark horse. The bold call wins leagues.</p>
+    <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0 0 10px"><strong style="color:#f0f0f0">1. Pick 6 golfers</strong> from the PGA Tour within a £50m budget. Mix the world number one with a rising underdog. The bold call wins leagues.</p>
     <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0 0 10px"><strong style="color:#f0f0f0">2. Name your Captain (2×) and Vice Captain (1.5×).</strong> Back the right man and the points stack up fast. Back the wrong one and the group chat will remind you. Repeatedly.</p>
     <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0 0 10px"><strong style="color:#f0f0f0">3. Use your chips wisely.</strong> Triple Captain, Vice, Mulligan, Full Bag — one shot at each, all season. Use them well and you look like a genius. Use them badly and, well, see point 2.</p>
     <p style="font-size:13px;color:#c8d8c8;line-height:1.8;margin:0"><strong style="color:#f0f0f0">4. Compete all season</strong> in private leagues, a global leaderboard, and a weekly sweepstake where the pot is entirely in your hands.</p>
@@ -620,7 +570,7 @@ async function bankTransfers(completedGameweek) {
 //   Top 5:          +£0.1m
 //
 // DROPS:
-//   Missed cut / LIV bottom 27: −£0.1m
+//   Missed cut: −£0.1m
 //   Two consecutive missed cuts: −£0.2m total
 //
 // FLOOR: £4.0m (nobody goes below)
@@ -634,7 +584,7 @@ async function updatePrices(completedTournamentName, isMajor = false) {
   try {
     console.log(`💰 Updating prices after: ${completedTournamentName} (major: ${isMajor})`);
 
-    // Fetch final results for this tournament (round 4 or final LIV round)
+    // Fetch final results for this tournament (round 4)
     const { data: scores, error: scErr } = await supabase
       .from('live_scores')
       .select('player_name, position, status, round, tour')
@@ -671,7 +621,7 @@ async function updatePrices(completedTournamentName, isMajor = false) {
       if (!player) return;
 
       const pos = parseInt(row.position) || 999;
-      const isCut = row.status === 'cut' || row.status === 'bottom27';
+      const isCut = row.status === 'cut';
       let delta = 0;
 
       if (isCut) {
@@ -1111,7 +1061,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`💳 Payments API listening on port ${PORT}`));
 
 async function main() {
-  console.log('🏌️  The Field — Scraper v5');
+  console.log('🏌️  The Field — Scraper v6 (PGA-only)');
   await checkSchema();
   await scrape();
   await calculateRankings();
