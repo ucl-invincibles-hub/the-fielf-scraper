@@ -570,10 +570,9 @@ async function bankTransfers(completedGameweek) {
 //   Top 5:          +£0.1m
 //
 // DROPS:
-//   Missed cut: −£0.1m
-//   Two consecutive missed cuts: −£0.2m total
+//   Missed cut: −£0.2m
 //
-// FLOOR: £4.0m (nobody goes below)
+// FLOOR: £3.8m (nobody goes below)
 // CEILING: None — Scheffler can keep rising.
 //
 // Sell price: players always sell at their CURRENT
@@ -613,7 +612,7 @@ async function updatePrices(completedTournamentName, isMajor = false) {
     const priceByName = {};
     players.forEach(p => { priceByName[p.name] = { id: p.id, price: parseFloat(p.price) }; });
 
-    const FLOOR = 4.0;
+    const FLOOR = 3.8;
     const updates = [];
 
     Object.values(byPlayer).forEach(row => {
@@ -625,7 +624,7 @@ async function updatePrices(completedTournamentName, isMajor = false) {
       let delta = 0;
 
       if (isCut) {
-        delta = -0.1;
+        delta = -0.2;
       } else if (pos === 1) {
         delta = isMajor ? 0.5 : 0.2;
       } else if (pos <= 5) {
