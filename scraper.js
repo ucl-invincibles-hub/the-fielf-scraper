@@ -359,34 +359,35 @@ async function fetchPGA() {
 // tied to this tournament (grouped by sweepstake_id). Also retries
 // any past winner who's since finished Connect onboarding.
 // ════════════════════════════════════════════════
+// Shared by both payoutSweepstakeWinners and payoutSeasonLeagues —
+// one tested path for actually moving money via Stripe Connect,
+// rather than two separate copies of the same logic.
+async function sendConnectPayout(userId, amountPence) {
+  const { data: pd } = await supabase.from('payout_details')
+    .select('stripe_connect_account_id,connect_onboarded').eq('user_id', userId).maybeSingle();
+  if (!pd?.stripe_connect_account_id || !pd?.connect_onboarded) {
+    return { status: 'pending_onboarding', transferId: null };
+  }
+  try {
+    const transfer = await stripe.transfers.create({
+      amount: amountPence,
+      currency: 'gbp',
+      destination: pd.stripe_connect_account_id
+    });
+    return { status: 'paid', transferId: transfer.id };
+  } catch(e) {
+    console.error(`Payout transfer failed for ${userId}:`, e.message);
+    return { status: 'failed', transferId: null };
+  }
+}
+
 async function payoutSweepstakeWinners(completedTournamentName) {
   try {
     const { data: rankings } = await supabase.from('rankings').select('user_id,week_total');
     const weekTotalByUser = {};
     (rankings || []).forEach(r => { weekTotalByUser[r.user_id] = r.week_total || 0; });
 
-    const { data: payoutRows } = await supabase.from('payout_details')
-      .select('user_id,stripe_connect_account_id,connect_onboarded');
-    const connectByUser = {};
-    (payoutRows || []).forEach(p => { connectByUser[p.user_id] = p; });
-
-    async function sendPayout(userId, amountPence) {
-      const pd = connectByUser[userId];
-      if (!pd?.stripe_connect_account_id || !pd?.connect_onboarded) {
-        return { status: 'pending_onboarding', transferId: null };
-      }
-      try {
-        const transfer = await stripe.transfers.create({
-          amount: amountPence,
-          currency: 'gbp',
-          destination: pd.stripe_connect_account_id
-        });
-        return { status: 'paid', transferId: transfer.id };
-      } catch(e) {
-        console.error(`Payout transfer failed for ${userId}:`, e.message);
-        return { status: 'failed', transferId: null };
-      }
-    }
+    const sendPayout = sendConnectPayout;
 
     // ---- Retry anyone still pending from a PAST tournament who has
     // since completed onboarding, before processing this week's new
@@ -480,6 +481,206 @@ async function payoutSweepstakeWinners(completedTournamentName) {
   }
 }
 
+// ════════════════════════════════════════════════
+// SEASON-END PAID LEAGUE PAYOUTS
+// Leagues run all season, not weekly, so this only triggers once —
+// when the tournament that just completed is the season's final
+// event. Reuses the exact same sendConnectPayout() path already
+// proven on the weekly sweepstake. League split is 95/5, NOT the
+// 90/10 used for sweepstakes — different fee, per the rulebook.
+// ════════════════════════════════════════════════
+const SEASON_FINALE_TOURNAMENT = 'Tour Championship'; // last of the 32 gameweeks — see FIXTURES in index.html
+
+async function payoutSeasonLeagues(completedTournamentName) {
+  if (!completedTournamentName || !completedTournamentName.includes(SEASON_FINALE_TOURNAMENT)) return;
+  try {
+    console.log('🏁 Season finale detected — processing paid league payouts...');
+    const { data: rankings } = await supabase.from('rankings').select('user_id,season_total');
+    const seasonTotalByUser = {};
+    (rankings || []).forEach(r => { seasonTotalByUser[r.user_id] = r.season_total || 0; });
+
+    const { data: leagues } = await supabase.from('leagues')
+      .select('id,name,prize_pool_pence').eq('is_paid', true).eq('payout_status', 'pending');
+
+    for (const league of (leagues || [])) {
+      const { data: members } = await supabase.from('league_members')
+        .select('id,user_id').eq('league_id', league.id);
+      if (!members?.length) continue;
+
+      const maxScore = Math.max(...members.map(m => seasonTotalByUser[m.user_id] || 0));
+      const winners = members.filter(m => (seasonTotalByUser[m.user_id] || 0) === maxScore);
+      const payoutTotal = Math.floor((league.prize_pool_pence || 0) * 0.95);
+      const perWinner = Math.floor(payoutTotal / winners.length);
+
+      let allPaid = true;
+      for (const winner of winners) {
+        const result = await sendConnectPayout(winner.user_id, perWinner);
+        console.log(`🏆 League "${league.name}" winner ${winner.user_id}: £${(perWinner/100).toFixed(2)} — ${result.status}`);
+        await supabase.from('league_members').update({
+          payout_status: result.status, payout_amount_pence: perWinner
+        }).eq('id', winner.id);
+        if (result.status !== 'paid') allPaid = false;
+      }
+      // Only mark the league fully settled once every individual
+      // winner's row shows paid — tracked per-member (not just one
+      // all-or-nothing league flag) specifically so a tie where one
+      // winner succeeds and another is still mid-onboarding can't
+      // result in the already-paid winner being paid a second time
+      // when the retry below picks the league back up.
+      await supabase.from('leagues').update({ payout_status: allPaid ? 'paid' : 'pending' }).eq('id', league.id);
+    }
+  } catch(e) {
+    console.error('payoutSeasonLeagues error:', e.message);
+  }
+}
+
+// Runs on every tournament transition (~32 times a season) rather
+// than waiting for the once-a-year season finale, so a league winner
+// who hadn't finished Connect onboarding at season's end still gets
+// paid promptly once they do, instead of waiting for next season.
+// Only ever touches league_members rows NOT already marked 'paid' —
+// this is what actually prevents double-paying a tied winner whose
+// payout already succeeded on a previous pass.
+async function retryStuckLeaguePayouts() {
+  try {
+    const { data: leagues } = await supabase.from('leagues')
+      .select('id,name').eq('is_paid', true).eq('payout_status', 'pending');
+    if (!leagues?.length) return;
+
+    for (const league of leagues) {
+      const { data: stuckMembers } = await supabase.from('league_members')
+        .select('id,user_id,payout_amount_pence')
+        .eq('league_id', league.id).eq('payout_status', 'pending_onboarding');
+      if (!stuckMembers?.length) continue;
+
+      for (const member of stuckMembers) {
+        const result = await sendConnectPayout(member.user_id, member.payout_amount_pence);
+        if (result.status !== 'pending_onboarding') {
+          await supabase.from('league_members').update({ payout_status: result.status }).eq('id', member.id);
+          console.log(`🏆 Retried league "${league.name}" payout for ${member.user_id}: ${result.status}`);
+        }
+      }
+
+      // Re-check whether every winner in this league is now paid
+      const { data: allMembers } = await supabase.from('league_members')
+        .select('payout_status').eq('league_id', league.id).not('payout_status', 'is', null);
+      const stillOwed = (allMembers || []).some(m => m.payout_status !== 'paid');
+      if (!stillOwed) await supabase.from('leagues').update({ payout_status: 'paid' }).eq('id', league.id);
+    }
+  } catch(e) {
+    console.error('retryStuckLeaguePayouts error:', e.message);
+  }
+}
+
+// ════════════════════════════════════════════════
+// MAJOR BONUS — rulebook has always promised this ("own the same
+// player across all 4 majors, earn a bonus based on how many they
+// win") but it had zero backend implementation. Building it properly
+// needs two things captured at the moment each major ends: (1) a
+// snapshot of every squad's full player_ids (ownership counts
+// anywhere in the squad, not just the active 4 — confirmed with the
+// founder), and (2) who actually won that major. Both captured here,
+// before live_scores gets cleared for the next gameweek. The bonus
+// itself is only actually calculated and awarded once, at season end
+// — see awardMajorBonus() below.
+// ════════════════════════════════════════════════
+const MAJORS_LIST = ['Masters Tournament', 'PGA Championship', 'U.S. Open', 'The Open'];
+
+async function captureMajorData(tournamentName) {
+  if (!MAJORS_LIST.some(m => tournamentName.includes(m))) return;
+  try {
+    // Snapshot every squad's ownership (anywhere in the 6, not just active)
+    const { data: squads } = await supabase.from('squads').select('user_id,player_ids');
+    if (squads?.length) {
+      const rows = squads.map(s => ({
+        user_id: s.user_id, tournament_name: tournamentName,
+        player_ids: (s.player_ids || []).map(String)
+      }));
+      await supabase.from('major_ownership_snapshot')
+        .upsert(rows, { onConflict: 'user_id,tournament_name' });
+    }
+
+    // Determine the winner from this major's final live_scores
+    const { data: scores } = await supabase.from('live_scores')
+      .select('player_name,position').eq('tournament_name', tournamentName);
+    const winnerRow = (scores || []).find(s => String(s.position).replace(/[^0-9]/g, '') === '1');
+    if (winnerRow) {
+      await supabase.from('major_winners')
+        .upsert({ tournament_name: tournamentName, winner_name: winnerRow.player_name }, { onConflict: 'tournament_name' });
+      console.log(`🏅 Major winner captured: ${tournamentName} → ${winnerRow.player_name}`);
+    }
+  } catch(e) {
+    console.error('captureMajorData error:', e.message);
+  }
+}
+
+// Only ever fires once, at the season's final gameweek. Checks every
+// user who has an ownership snapshot for all 4 majors, finds any
+// player who was in their squad (anywhere) for all 4, and awards the
+// bonus tier matching how many of those majors that player actually
+// won. Uses gameweek_history as the delivery mechanism — it already
+// gets summed into season_total by the existing accumulation logic,
+// so no changes needed there.
+async function awardMajorBonus(completedTournamentName) {
+  if (!completedTournamentName || !completedTournamentName.includes(SEASON_FINALE_TOURNAMENT)) return;
+  try {
+    console.log('🏅 Season finale detected — checking Major Bonus eligibility...');
+    const { data: snapshots } = await supabase.from('major_ownership_snapshot')
+      .select('user_id,tournament_name,player_ids').in('tournament_name', MAJORS_LIST);
+    if (!snapshots?.length) return;
+
+    const { data: winners } = await supabase.from('major_winners').select('tournament_name,winner_name');
+    const winnerByMajor = {};
+    (winners || []).forEach(w => { winnerByMajor[w.tournament_name] = w.winner_name; });
+
+    const { data: players } = await supabase.from('players').select('id,name');
+    const nameById = {};
+    (players || []).forEach(p => { nameById[String(p.id)] = p.name; });
+
+    const snapshotsByUser = {};
+    (snapshots || []).forEach(s => {
+      if (!snapshotsByUser[s.user_id]) snapshotsByUser[s.user_id] = {};
+      snapshotsByUser[s.user_id][s.tournament_name] = s.player_ids;
+    });
+
+    const bonusRows = [];
+    for (const userId of Object.keys(snapshotsByUser)) {
+      const userSnaps = snapshotsByUser[userId];
+      // Must have a snapshot for every single major, not just some
+      if (!MAJORS_LIST.every(m => userSnaps[m])) continue;
+
+      // Find any player_id present in ALL 4 major snapshots
+      const [first, ...rest] = MAJORS_LIST.map(m => userSnaps[m]);
+      const commonIds = first.filter(pid => rest.every(list => list.includes(pid)));
+      if (!commonIds.length) continue;
+
+      for (const pid of commonIds) {
+        const name = nameById[pid];
+        if (!name) continue;
+        const winsCount = MAJORS_LIST.filter(m => winnerByMajor[m] === name).length;
+        let bonus = 0;
+        if (winsCount === 4) bonus = 500;
+        else if (winsCount === 3) bonus = 200;
+        else if (winsCount === 2) bonus = 75;
+        if (bonus > 0) {
+          console.log(`🏅 Major Bonus: ${userId} owned ${name} across all 4 majors (${winsCount} wins) — +${bonus}`);
+          bonusRows.push({ user_id: userId, tournament_name: 'Major Bonus 2027', points: bonus });
+        }
+      }
+    }
+
+    if (bonusRows.length) {
+      await supabase.from('gameweek_history')
+        .upsert(bonusRows, { onConflict: 'user_id,tournament_name' });
+      console.log(`🏅 Awarded Major Bonus to ${bonusRows.length} manager(s)`);
+    } else {
+      console.log('🏅 No Major Bonus winners this season');
+    }
+  } catch(e) {
+    console.error('awardMajorBonus error:', e.message);
+  }
+}
+
 async function archiveGameweekResults(completedTournamentName) {
   try {
     const { data: rankings, error } = await supabase
@@ -519,7 +720,11 @@ async function writeScores(players) {
     if (oldTournament && oldTournament !== newTournament) {
       console.log(`🔄 New ${tour} tournament: ${newTournament} (was ${oldTournament}) — clearing old ${tour} data`);
       await archiveGameweekResults(oldTournament);
+      await captureMajorData(oldTournament);
       await payoutSweepstakeWinners(oldTournament);
+      await payoutSeasonLeagues(oldTournament);
+      await awardMajorBonus(oldTournament);
+      await retryStuckLeaguePayouts();
       // Pricing and transfer-banking both need the completed tournament's
       // final results — they MUST run before the delete below, not after.
       // (This was previously ordered delete-then-price, which meant
@@ -1234,6 +1439,111 @@ app.post('/api/private-sweepstake/create', async (req, res) => {
   }
 });
 
+// ════════════════════════════════════════════════
+// PAID PRIVATE LEAGUES — season-long, not weekly.
+// The "leagues" and "league_members" tables already existed (free
+// leagues have worked for a while), and the schema already had
+// is_paid/entry_fee_pence/prize_pool_pence/payout_status columns
+// ready — but the actual paid entry flow was just an alert saying
+// "coming soon" with nothing behind it. This builds the real thing,
+// reusing the exact same Stripe Checkout + Connect payout pattern
+// already proven on the weekly sweepstake, just settled once at
+// season end instead of every gameweek.
+// ════════════════════════════════════════════════
+
+// ---- Paid League: Create ----
+app.post('/api/league/create-paid', async (req, res) => {
+  try {
+    if (!stripe) return res.status(503).json({ error: 'Payments not configured' });
+    const enabled = await paymentsEnabled();
+    if (!enabled) return res.status(403).json({ error: 'Payments are not yet enabled' });
+
+    const user = await getUserFromToken(req.headers.authorization);
+    if (!user || !user.id) return res.status(401).json({ error: 'Not authenticated' });
+
+    const { leagueName, entryFeePence } = req.body;
+    const allowedFees = [500, 1000, 2000, 5000]; // £5 / £10 / £20 / £50, matching the rulebook
+    if (!allowedFees.includes(entryFeePence)) {
+      return res.status(400).json({ error: 'Entry fee must be £5, £10, £20, or £50' });
+    }
+
+    const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+
+    const { data: league, error: insertErr } = await supabase.from('leagues').insert({
+      code, name: leagueName || 'My League', created_by: user.id, season_year: 2027,
+      is_private: true, is_paid: true, entry_fee_pence: entryFeePence,
+      prize_pool_pence: 0, payout_status: 'pending'
+    }).select().single();
+    if (insertErr) return res.status(500).json({ error: insertErr.message });
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'gbp',
+          product_data: { name: `The Field — ${league.name} (Season League Entry)` },
+          unit_amount: entryFeePence
+        },
+        quantity: 1
+      }],
+      metadata: { user_id: user.id, type: 'paid_league_entry', league_id: String(league.id) },
+      success_url: 'https://thefieldfantasygolf.com/?payment=success',
+      cancel_url: 'https://thefieldfantasygolf.com/?payment=cancelled'
+    });
+
+    res.json({ url: session.url, code, leagueId: league.id });
+  } catch(e) {
+    console.log('paid league create error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---- Paid League: Join via code ----
+app.post('/api/league/join-paid', async (req, res) => {
+  try {
+    if (!stripe) return res.status(503).json({ error: 'Payments not configured' });
+    const enabled = await paymentsEnabled();
+    if (!enabled) return res.status(403).json({ error: 'Payments are not yet enabled' });
+
+    const user = await getUserFromToken(req.headers.authorization);
+    if (!user || !user.id) return res.status(401).json({ error: 'Not authenticated' });
+
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ error: 'Missing league code' });
+
+    const { data: league } = await supabase.from('leagues').select('*').eq('code', code).single();
+    if (!league) return res.status(404).json({ error: 'League not found' });
+    if (!league.is_paid) return res.status(400).json({ error: 'This is a free league — join it directly, no payment needed' });
+    if (league.payout_status !== 'pending') return res.status(400).json({ error: 'This league has already been settled' });
+
+    const { data: existing } = await supabase.from('league_members')
+      .select('id').eq('league_id', league.id).eq('user_id', user.id).maybeSingle();
+    if (existing) return res.status(400).json({ error: 'You are already in this league' });
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'gbp',
+          product_data: { name: `The Field — ${league.name} (Season League Entry)` },
+          unit_amount: league.entry_fee_pence
+        },
+        quantity: 1
+      }],
+      metadata: { user_id: user.id, type: 'paid_league_entry', league_id: String(league.id) },
+      success_url: 'https://thefieldfantasygolf.com/?payment=success',
+      cancel_url: 'https://thefieldfantasygolf.com/?payment=cancelled'
+    });
+
+    res.json({ url: session.url });
+  } catch(e) {
+    console.log('paid league join error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---- Private Sweepstake: Get mine (for this week's entries panel) ----
 app.get('/api/private-sweepstake/my', async (req, res) => {
   try {
@@ -1390,6 +1700,21 @@ app.post('/api/stripe/webhook', async (req, res) => {
             .eq('id', meta.sweepstake_id);
         }
         console.log(`✅ Private sweepstake payment confirmed: ${meta.user_id}`);
+      }
+      if (meta.type === 'paid_league_entry') {
+        // Unlike sweepstake entries, there's no pending row created
+        // up front here — the member row is inserted only once
+        // payment is actually confirmed.
+        await supabase.from('league_members').insert({
+          league_id: meta.league_id, user_id: meta.user_id, total_points: 0, rank: 0
+        });
+        const { data: league } = await supabase.from('leagues').select('prize_pool_pence').eq('id', meta.league_id).single();
+        if (league) {
+          await supabase.from('leagues')
+            .update({ prize_pool_pence: (league.prize_pool_pence || 0) + session.amount_total })
+            .eq('id', meta.league_id);
+        }
+        console.log(`✅ Paid league entry confirmed: ${meta.user_id} → league ${meta.league_id}`);
       }
     } catch(e) { console.log('Webhook processing error:', e.message); }
   }
