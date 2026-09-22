@@ -45,11 +45,9 @@ function calcFinishPoints(posNum, type) {
   return Math.round(pts * mult);
 }
 
-// Estimate stroke points from cumulative score vs par
-// We know total_score (e.g. -10 means 10 under) but not individual holes
-// Stroke points estimated from total cumulative score vs par.
-// ESPN's c.score is reliably relative-to-par (e.g. -4 = 4 under).
-// Hole-by-hole parsing is deferred until Goalserve API is integrated.
+// Estimate stroke points from cumulative score vs par (FALLBACK ONLY —
+// used when ESPN doesn't give us real per-hole data for this event).
+// We know total_score (e.g. -10 means 10 under) but not individual holes.
 function estimateStrokePoints(totalScore) {
   const score = parseInt(totalScore) || 0;
   if (score === 0) return 0;
@@ -64,6 +62,43 @@ function estimateStrokePoints(totalScore) {
     const bogeys = score - doubles;
     return bogeys * -2 + doubles * -4;
   }
+}
+
+// ════════════════════════════════════════════════
+// REAL HOLE-BY-HOLE SCORING
+// ESPN's linescores[period].linescores[] array holds each hole's
+// score RELATIVE TO PAR for that hole (e.g. -1 = birdie, +1 = bogey)
+// whenever ESPN actually provides granular data for an event — this
+// was already being fetched and even logged ("REAL hole-by-hole" vs
+// "ESTIMATED") but never actually used; scoring fell back to a
+// statistical guess every time regardless. This function replaces
+// that guess with a genuine count whenever real data is present.
+//
+// Known limit: a hole-in-one and a normal eagle on a longer hole
+// both show up as the same relative value (there's no hole-par field
+// in this payload to tell them apart), so aces are folded into the
+// eagle tier rather than falsely claiming to detect them separately.
+// ════════════════════════════════════════════════
+function calculateRealHolePoints(linescores) {
+  let points = 0, birdies = 0, eagles = 0, bogeys = 0, doublesOrWorse = 0;
+  let holesCounted = 0;
+
+  (linescores || []).forEach(roundLine => {
+    (roundLine.linescores || []).forEach(hole => {
+      const val = parseInt(hole?.value);
+      if (isNaN(val) || Math.abs(val) > 3) return; // not real relative-to-par data
+      holesCounted++;
+      if (val <= -2) { points += 8; eagles++; }
+      else if (val === -1) { points += 4; birdies++; }
+      else if (val === 0) { /* par: 0 points */ }
+      else if (val === 1) { points -= 2; bogeys++; }
+      else if (val === 2) { points -= 4; doublesOrWorse++; }
+      else if (val === 3) { points -= 6; doublesOrWorse++; }
+      else { points -= 8; doublesOrWorse++; } // val >= 4: a "blob"
+    });
+  });
+
+  return { points, birdies, eagles, bogeys, doublesOrWorse, hasRealData: holesCounted > 0 };
 }
 
 async function fetchPGA() {
@@ -81,6 +116,20 @@ async function fetchPGA() {
     const tournamentType = getTournamentType(tournamentName);
     const competition = event.competitions?.[0];
     if (!competition) return null;
+
+    // Skip team match-play exhibitions entirely (Presidents Cup, Ryder
+    // Cup, Solheim Cup). These aren't stroke-play events — there's no
+    // per-player score-to-par or finishing position the way our whole
+    // fantasy scoring system expects, and ESPN structures team pairings
+    // completely differently, which was producing garbage ("Unknown"
+    // players, 0 points, duplicate-key upsert errors) whenever one of
+    // these landed on tour in the same window as a real PGA event.
+    const TEAM_EVENTS = ['presidents cup', 'ryder cup', 'solheim cup'];
+    const nameLower = tournamentName.toLowerCase();
+    if (TEAM_EVENTS.some(t => nameLower.includes(t))) {
+      console.log(`⏭️  Skipping team event: ${tournamentName} (not a fantasy-scorable stroke-play event)`);
+      return null;
+    }
 
     // Write tournament info with real tee-time based transfer window
     try {
@@ -178,8 +227,11 @@ async function fetchPGA() {
       // Rounds played — treat current in-progress round as counting if player has a score
       const roundsPlayed = isComplete ? round : (totalScore !== 0 || thru > 0 ? round : Math.max(0, round - 1));
 
-      // Stroke points from cumulative vs par score (reliable from ESPN)
-      const strokePts = estimateStrokePoints(totalScore);
+      // Stroke points: use REAL hole-by-hole counting whenever ESPN
+      // actually gives us per-hole data for this event, falling back
+      // to the statistical estimate only when it doesn't.
+      const holeData = calculateRealHolePoints(linescores);
+      const strokePts = holeData.hasRealData ? holeData.points : estimateStrokePoints(totalScore);
 
       // Finish points only when the TOURNAMENT is complete, not just a round.
       // ESPN's competition.status.type.completed flag has been observed to
@@ -201,10 +253,10 @@ async function fetchPGA() {
         thru,
         total_score: totalScore,
         round_score: roundScore,
-        birdies: 0,
-        eagles: 0,
-        bogeys: 0,
-        doubles_or_worse: 0,
+        birdies: holeData.hasRealData ? holeData.birdies : 0,
+        eagles: holeData.hasRealData ? holeData.eagles : 0,
+        bogeys: holeData.hasRealData ? holeData.bogeys : 0,
+        doubles_or_worse: holeData.hasRealData ? holeData.doublesOrWorse : 0,
         stroke_points: strokePts,
         finish_points: finishPts,
         total_points: totalPts,
@@ -309,14 +361,18 @@ async function writeScores(players) {
     if (oldTournament && oldTournament !== newTournament) {
       console.log(`🔄 New ${tour} tournament: ${newTournament} (was ${oldTournament}) — clearing old ${tour} data`);
       await archiveGameweekResults(oldTournament);
-      await supabase.from('live_scores').delete()
-        .eq('tournament_name', oldTournament)
-        .eq('tour', tour);
-      await bankTransfers(oldTournament);
-      // Check if the completed tournament is a major for the price multiplier
+      // Pricing and transfer-banking both need the completed tournament's
+      // final results — they MUST run before the delete below, not after.
+      // (This was previously ordered delete-then-price, which meant
+      // updatePrices always queried an already-empty table and silently
+      // did nothing — prices never actually moved from real results.)
       const MAJORS = ['Masters Tournament', 'PGA Championship', 'U.S. Open', 'The Open'];
       const isMajor = MAJORS.some(m => oldTournament.includes(m));
       await updatePrices(oldTournament, isMajor);
+      await bankTransfers(oldTournament);
+      await supabase.from('live_scores').delete()
+        .eq('tournament_name', oldTournament)
+        .eq('tour', tour);
     }
   }
 
@@ -700,7 +756,10 @@ async function updatePrices(completedTournamentName, isMajor = false) {
       const player = priceByName[row.player_name];
       if (!player) return;
 
-      const pos = parseInt(row.position) || 999;
+      // Strip non-numeric prefixes ("T2" -> "2") — ties are common in golf
+      // and parseInt alone fails on a leading "T", silently defaulting
+      // every tied position to 999 and missing their price bump.
+      const pos = parseInt(String(row.position || '').replace(/[^0-9]/g, '')) || 999;
       const isCut = row.status === 'cut';
       let delta = 0;
 
@@ -742,6 +801,9 @@ async function updatePrices(completedTournamentName, isMajor = false) {
   }
 }
 
+// NOTE: superseded by an equivalent lookup done directly in the
+// frontend's loadTransferAllowance() — kept here only as a reference;
+// this was defined but never actually called by anything.
 async function getBankedTransfers(userId) {
   try {
     const { data } = await supabase.from('transfer_allowance')
