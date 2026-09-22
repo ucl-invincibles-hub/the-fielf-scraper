@@ -253,6 +253,46 @@ async function fetchPGA() {
   }
 }
 
+// ════════════════════════════════════════════════
+// SEASON HISTORY ARCHIVE
+// Called right before a tournament's live_scores get
+// wiped for the new gameweek. Snapshots each user's
+// just-finished week_total (last computed by
+// calculateRankings while that tournament was still
+// live) into gameweek_history, so season_total can
+// keep accumulating across the whole season instead
+// of resetting to only the current week every time.
+// Requires a gameweek_history table:
+//   id uuid default gen_random_uuid() primary key,
+//   user_id uuid not null,
+//   tournament_name text not null,
+//   points int not null default 0,
+//   created_at timestamptz default now(),
+//   unique(user_id, tournament_name)
+// ════════════════════════════════════════════════
+async function archiveGameweekResults(completedTournamentName) {
+  try {
+    const { data: rankings, error } = await supabase
+      .from('rankings')
+      .select('user_id, week_total');
+    if (error) { console.error('archiveGameweekResults: rankings fetch error:', error.message); return; }
+    if (!rankings?.length) { console.log('archiveGameweekResults: no rankings to archive'); return; }
+
+    const rows = rankings.map(r => ({
+      user_id: r.user_id,
+      tournament_name: completedTournamentName,
+      points: r.week_total || 0
+    }));
+
+    const { error: insErr } = await supabase.from('gameweek_history')
+      .upsert(rows, { onConflict: 'user_id,tournament_name' });
+    if (insErr) console.error('archiveGameweekResults: insert error:', insErr.message);
+    else console.log(`🗄️  Archived ${rows.length} result(s) for ${completedTournamentName}`);
+  } catch(e) {
+    console.log('archiveGameweekResults error:', e.message);
+  }
+}
+
 async function writeScores(players) {
   if (!players?.length) return;
   
@@ -268,6 +308,7 @@ async function writeScores(players) {
     const oldTournament = existing?.[0]?.tournament_name;
     if (oldTournament && oldTournament !== newTournament) {
       console.log(`🔄 New ${tour} tournament: ${newTournament} (was ${oldTournament}) — clearing old ${tour} data`);
+      await archiveGameweekResults(oldTournament);
       await supabase.from('live_scores').delete()
         .eq('tournament_name', oldTournament)
         .eq('tour', tour);
@@ -299,14 +340,20 @@ async function scrape() {
 }
 
 // ═══════════ STEP 4: GLOBAL RANKINGS ═══════════
-// For each saved squad, sum each of the 5 active players' total_points
-// across all live_scores rows (their season contribution), applying
-// captain x2 / vice-captain x1.5, then write season_total + week_total
-// to the rankings table. Finally rank all users by season_total.
-//
-// Note: v1 — no auto-substitution. All 5 active players always count,
-// reserves never do. Auto-sub can be layered in once this base pipeline
-// is verified working.
+// v2 — fixed to match the real 6-player squad format (4 active + 2
+// reserves — the 5-active assumption was a leftover from an old
+// 7-player format and was silently scoring the wrong player every
+// week). Also adds:
+//   - Auto-substitution: an active player with no row in this week's
+//     field (not "cut" — genuinely absent, e.g. withdrawn/not entered)
+//     is swapped for the highest-scoring reserve who IS in the field.
+//   - Chip effects: reads chip_usage for the CURRENT tournament and
+//     applies Triple Captain (3x), Vice (VC at 2x), Full Bag (all 6
+//     score). Mulligan affects transfers, not scoring — handled in
+//     the transfer-allowance path, not here.
+//   - Season-long accumulation: season_total is now historical points
+//     from gameweek_history (archived at each tournament transition,
+//     see archiveGameweekResults) PLUS the current, still-live week.
 
 async function calculateRankings() {
   console.log('\n📊 Calculating rankings...');
@@ -329,18 +376,11 @@ async function calculateRankings() {
   // Find the most recently updated tournament (used for "week_total")
   let latestTournament = null;
   let latestUpdated = null;
-  let latestRound = 0;
   (scores || []).forEach(s => {
     const updated = new Date(s.updated_at || 0);
     if (!latestUpdated || updated > latestUpdated) {
       latestUpdated = updated;
       latestTournament = s.tournament_name;
-    }
-  });
-  // Get highest round for that tournament
-  (scores || []).forEach(s => {
-    if (s.tournament_name === latestTournament && s.round > latestRound) {
-      latestRound = s.round;
     }
   });
 
@@ -350,42 +390,83 @@ async function calculateRankings() {
     if (!scoresByPlayer[s.player_name]) scoresByPlayer[s.player_name] = [];
     scoresByPlayer[s.player_name].push(s);
   });
+  // A player "is in the field this week" if they have any row at all
+  // for the current tournament (cut still counts — they teed it up).
+  function isInFieldThisWeek(name) {
+    const rows = scoresByPlayer[name] || [];
+    return rows.some(r => r.tournament_name === latestTournament);
+  }
+  function weekPointsFor(name) {
+    const rows = scoresByPlayer[name] || [];
+    let pts = 0;
+    rows.forEach(r => { if (r.tournament_name === latestTournament) pts += (r.total_points || 0); });
+    return pts;
+  }
+
+  // 3b. Fetch historical (archived) season points — see archiveGameweekResults()
+  const { data: history, error: historyErr } = await supabase.from('gameweek_history').select('user_id,points');
+  if (historyErr) console.error('rankings: gameweek_history fetch error:', historyErr.message);
+  const historicalByUser = {};
+  (history || []).forEach(h => {
+    historicalByUser[h.user_id] = (historicalByUser[h.user_id] || 0) + (h.points || 0);
+  });
+
+  // 3c. Fetch chip usage active for THIS gameweek only
+  const { data: chipRows, error: chipErr } = await supabase.from('chip_usage')
+    .select('user_id,chip_name').eq('tournament_name', latestTournament || '');
+  if (chipErr) console.error('rankings: chip_usage fetch error:', chipErr.message);
+  const chipByUser = {};
+  (chipRows || []).forEach(c => { chipByUser[c.user_id] = c.chip_name; });
 
   const results = [];
 
   for (const squad of squads) {
-    const ids = squad.player_ids || [];
-    const activeIds = ids.slice(0, 5); // first 5 are active, last 2 are reserves
+    const ids = (squad.player_ids || []).map(String);
+    const activeChip = chipByUser[squad.user_id] || null;
+    // Full Bag: all 6 score. Otherwise: first 4 active, last 2 reserve.
+    let activeIds = activeChip === 'benchboost' ? ids.slice(0, 6) : ids.slice(0, 4);
+    const reserveIds = activeChip === 'benchboost' ? [] : ids.slice(4, 6);
     const capId = String(squad.captain_id || '');
     const vcId = String(squad.vice_captain_id || '');
 
-    let seasonTotal = 0;
+    // Auto-substitution: swap out any active player genuinely absent
+    // from this week's field for the highest-scoring reserve who IS in.
+    if (reserveIds.length) {
+      const availableReserves = reserveIds
+        .map(pid => ({ pid, name: playerNameById[pid] }))
+        .filter(r => r.name && isInFieldThisWeek(r.name))
+        .map(r => ({ ...r, pts: weekPointsFor(r.name) }))
+        .sort((a, b) => b.pts - a.pts);
+      let reserveCursor = 0;
+      activeIds = activeIds.map(pid => {
+        const name = playerNameById[pid];
+        if (name && !isInFieldThisWeek(name) && reserveCursor < availableReserves.length) {
+          const sub = availableReserves[reserveCursor++];
+          console.log(`🔄 Auto-sub for ${squad.team_name || squad.user_id}: ${name} absent, subbing in ${sub.name}`);
+          return sub.pid;
+        }
+        return pid;
+      });
+    }
+
+    let seasonTotal = historicalByUser[squad.user_id] || 0;
     let weekTotal = 0;
 
     for (const pid of activeIds) {
-      const name = playerNameById[String(pid)];
+      const name = playerNameById[pid];
       if (!name) continue;
-      const rows = scoresByPlayer[name] || [];
+      const playerWeekPts = weekPointsFor(name);
 
-      // With one row per player per tournament, total_points = this week's points
-      // Season total needs to come from a separate accumulation — for now use week_total
-      // as both until we build proper season history table
-      let playerWeekPts = 0;
-      rows.forEach(r => {
-        if (r.tournament_name === latestTournament) {
-          playerWeekPts += (r.total_points || 0);
-        }
-      });
-      let playerSeasonPts = playerWeekPts; // TODO: accumulate from completed gameweeks
-
-      // Apply captain / vice-captain multiplier to this player's contribution
+      // Apply captain / vice-captain multiplier, adjusted for chips:
+      //   Triple Captain: captain scores 3x instead of 2x
+      //   Vice:           vice-captain scores 2x instead of 1.5x
       let mult = 1;
-      if (String(pid) === capId) mult = 2;
-      else if (String(pid) === vcId) mult = 1.5;
+      if (pid === capId) mult = activeChip === 'triplecap' ? 3 : 2;
+      else if (pid === vcId) mult = activeChip === 'vice' ? 2 : 1.5;
 
-      seasonTotal += Math.round(playerSeasonPts * mult);
       weekTotal += Math.round(playerWeekPts * mult);
     }
+    seasonTotal += weekTotal;
 
     results.push({
       user_id: squad.user_id,
