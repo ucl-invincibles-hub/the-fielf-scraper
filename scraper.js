@@ -832,15 +832,20 @@ async function sendWelcomeEmail(email, teamName) {
   </div>
   <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:20px;margin-bottom:24px">
     <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:#4ade80;text-transform:uppercase;margin-bottom:12px">Paid Pot Leagues</div>
-    <p style="font-size:13px;color:#c8d8c8;line-height:1.7;margin:0 0 12px">Create a private league with your mates and set an entry fee. £5, £10, £20, £50 — your call. Winner takes the pot at the end of the season, paid automatically.</p>
-    <p style="font-size:13px;color:#c8d8c8;line-height:1.7;margin:0 0 14px">And the days of chasing your mates round the houses for your fantasy winnings? Behind you. Stripe handles it. The gentleman always gets paid.</p>
+    <p style="font-size:13px;color:#c8d8c8;line-height:1.7;margin:0 0 12px">Create a private league with your mates and set an entry fee. £5, £10, £20, £50 — your call. Winner takes the pot at the end of the season.</p>
+    <p style="font-size:13px;color:#c8d8c8;line-height:1.7;margin:0 0 14px">And the days of chasing your mates round the houses for your fantasy winnings? Behind you. Stripe handles every payment. The gentleman always gets paid.</p>
     <p style="font-family:Georgia,serif;font-size:14px;color:#c8a830;font-style:italic;margin:0;text-align:center">"A gentleman always pays his debts — and a gentleman always collects what he is owed."</p>
+  </div>
+  <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(74,222,128,0.15);border-radius:8px;padding:20px;margin-bottom:24px">
+    <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:#4ade80;text-transform:uppercase;margin-bottom:12px">Payments &amp; Your Data</div>
+    <p style="font-size:13px;color:#c8d8c8;line-height:1.7;margin:0 0 10px">Every payment — entries and winnings alike — is handled entirely by Stripe, a payments platform trusted by millions of businesses worldwide. Your card details go straight to Stripe when you enter a sweepstake; if you win, you'll connect your bank details once through Stripe's own secure onboarding, and your winnings are sent straight to your bank account automatically.</p>
+    <p style="font-size:13px;color:#c8d8c8;line-height:1.7;margin:0">The Field never sees or stores your card number, bank details, or any identity documents. That information stays with Stripe, not with us. Full details are in the app's Rules menu under "Payments &amp; Your Data."</p>
   </div>
   <table style="width:100%;border:1px solid rgba(200,168,48,0.25);border-radius:8px;border-collapse:separate;border-spacing:0;margin-bottom:28px;overflow:hidden">
     <tr><td colspan="3" style="padding:14px 20px;border-bottom:1px solid rgba(200,168,48,0.15);text-align:center;font-size:11px;font-weight:700;letter-spacing:2px;color:#c8a830;text-transform:uppercase">Season Prizes</td></tr>
     <tr>
       <td style="padding:18px 14px;text-align:center;border-right:1px solid rgba(200,168,48,0.1);width:33%"><div style="font-size:20px;margin-bottom:6px">🥇</div><div style="font-size:10px;font-weight:700;color:#c8a830;margin-bottom:6px">1ST PLACE</div><div style="font-family:Georgia,serif;font-size:12px;color:#f0f0f0;line-height:1.5">Sunday Hospitality at The Open Championship</div></td>
-      <td style="padding:18px 14px;text-align:center;border-right:1px solid rgba(200,168,48,0.1);width:33%"><div style="font-size:20px;margin-bottom:6px">🥈</div><div style="font-size:10px;font-weight:700;color:#9ca3af;margin-bottom:6px">2ND PLACE</div><div style="font-family:Georgia,serif;font-size:12px;color:#f0f0f0;line-height:1.5">Portugal Golf Holiday</div></td>
+      <td style="padding:18px 14px;text-align:center;border-right:1px solid rgba(200,168,48,0.1);width:33%"><div style="font-size:20px;margin-bottom:6px">🥈</div><div style="font-size:10px;font-weight:700;color:#9ca3af;margin-bottom:6px">2ND PLACE</div><div style="font-family:Georgia,serif;font-size:12px;color:#f0f0f0;line-height:1.5">Golf Holiday (destination TBC)</div></td>
       <td style="padding:18px 14px;text-align:center;width:33%"><div style="font-size:20px;margin-bottom:6px">🥉</div><div style="font-size:10px;font-weight:700;color:#cd7f32;margin-bottom:6px">3RD PLACE</div><div style="font-family:Georgia,serif;font-size:12px;color:#f0f0f0;line-height:1.5">Premium Golf Equipment</div></td>
     </tr>
   </table>
