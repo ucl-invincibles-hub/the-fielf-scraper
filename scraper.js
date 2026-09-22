@@ -657,6 +657,7 @@ async function calculateRankings() {
   (checkpoints || []).forEach(c => { checkpointByName[c.player_name] = c.points_at_r2 || 0; });
 
   const results = [];
+  const autoSubEvents = []; // collected below, written to auto_sub_log after the loop
 
   for (const squad of squads) {
     const ids = (squad.player_ids || []).map(String);
@@ -687,6 +688,16 @@ async function calculateRankings() {
         if (name && !isInFieldThisWeek(name) && reserveCursor < availableReserves.length) {
           const sub = availableReserves[reserveCursor++];
           console.log(`🔄 Auto-sub for ${squad.team_name || squad.user_id}: ${name} absent, subbing in ${sub.name}`);
+          // Previously this only logged to the console — the frontend
+          // had no way to know a substitution happened at all, which
+          // meant a user's weekly score could silently change with no
+          // visible explanation anywhere in the app.
+          autoSubEvents.push({
+            user_id: squad.user_id,
+            tournament_name: latestTournament,
+            outgoing_player_name: name,
+            incoming_player_name: sub.name
+          });
           return sub.pid;
         }
         return pid;
@@ -748,6 +759,15 @@ async function calculateRankings() {
       season_total: seasonTotal,
       week_total: weekTotal
     });
+  }
+
+  // Write auto-sub events so the frontend can actually show them —
+  // upsert per user+tournament so this stays current if rankings
+  // recalculate mid-week (a player could go from absent to playing,
+  // or vice versa, as ESPN's data updates).
+  if (autoSubEvents.length) {
+    await supabase.from('auto_sub_log')
+      .upsert(autoSubEvents, { onConflict: 'user_id,tournament_name' });
   }
 
   // 4. Rank by season_total descending
