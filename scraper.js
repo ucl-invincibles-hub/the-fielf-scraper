@@ -350,6 +350,136 @@ async function fetchPGA() {
 //   created_at timestamptz default now(),
 //   unique(user_id, tournament_name)
 // ════════════════════════════════════════════════
+// ════════════════════════════════════════════════
+// SWEEPSTAKE PAYOUTS — the actual money-out half of Stripe Connect.
+// Called at the tournament transition point, same as
+// archiveGameweekResults, right while rankings.week_total still
+// reflects the tournament that's ending. Handles both the global
+// sweepstake (grouped by stake tier) and every private sweepstake
+// tied to this tournament (grouped by sweepstake_id). Also retries
+// any past winner who's since finished Connect onboarding.
+// ════════════════════════════════════════════════
+async function payoutSweepstakeWinners(completedTournamentName) {
+  try {
+    const { data: rankings } = await supabase.from('rankings').select('user_id,week_total');
+    const weekTotalByUser = {};
+    (rankings || []).forEach(r => { weekTotalByUser[r.user_id] = r.week_total || 0; });
+
+    const { data: payoutRows } = await supabase.from('payout_details')
+      .select('user_id,stripe_connect_account_id,connect_onboarded');
+    const connectByUser = {};
+    (payoutRows || []).forEach(p => { connectByUser[p.user_id] = p; });
+
+    async function sendPayout(userId, amountPence) {
+      const pd = connectByUser[userId];
+      if (!pd?.stripe_connect_account_id || !pd?.connect_onboarded) {
+        return { status: 'pending_onboarding', transferId: null };
+      }
+      try {
+        const transfer = await stripe.transfers.create({
+          amount: amountPence,
+          currency: 'gbp',
+          destination: pd.stripe_connect_account_id
+        });
+        return { status: 'paid', transferId: transfer.id };
+      } catch(e) {
+        console.error(`Payout transfer failed for ${userId}:`, e.message);
+        return { status: 'failed', transferId: null };
+      }
+    }
+
+    // ---- Retry anyone still pending from a PAST tournament who has
+    // since completed onboarding, before processing this week's new
+    // winners ----
+    const { data: pendingGlobal } = await supabase.from('sweepstake_entries')
+      .select('id,user_id,payout_amount_pence').eq('payout_status', 'pending_onboarding');
+    for (const entry of (pendingGlobal || [])) {
+      const result = await sendPayout(entry.user_id, entry.payout_amount_pence);
+      if (result.status !== 'pending_onboarding') {
+        await supabase.from('sweepstake_entries').update({
+          payout_status: result.status, stripe_transfer_id: result.transferId
+        }).eq('id', entry.id);
+        console.log(`💸 Retried pending payout for ${entry.user_id}: ${result.status}`);
+      }
+    }
+    const { data: pendingPrivate } = await supabase.from('private_sweepstake_entries')
+      .select('id,user_id,payout_amount_pence').eq('payout_status', 'pending_onboarding');
+    for (const entry of (pendingPrivate || [])) {
+      const result = await sendPayout(entry.user_id, entry.payout_amount_pence);
+      if (result.status !== 'pending_onboarding') {
+        await supabase.from('private_sweepstake_entries').update({
+          payout_status: result.status, stripe_transfer_id: result.transferId
+        }).eq('id', entry.id);
+        console.log(`💸 Retried pending private payout for ${entry.user_id}: ${result.status}`);
+      }
+    }
+
+    // ---- GLOBAL SWEEPSTAKE: grouped by stake tier ----
+    const { data: entries } = await supabase.from('sweepstake_entries')
+      .select('id,user_id,stake_pence').eq('tournament_name', completedTournamentName)
+      .eq('payment_status', 'paid').eq('payout_status', 'not_applicable');
+
+    const byTier = {};
+    (entries || []).forEach(e => {
+      if (!byTier[e.stake_pence]) byTier[e.stake_pence] = [];
+      byTier[e.stake_pence].push(e);
+    });
+
+    for (const tier of Object.keys(byTier)) {
+      const tierEntries = byTier[tier];
+      const pot = tierEntries.reduce((sum, e) => sum + e.stake_pence, 0);
+      const maxScore = Math.max(...tierEntries.map(e => weekTotalByUser[e.user_id] || 0));
+      const winners = tierEntries.filter(e => (weekTotalByUser[e.user_id] || 0) === maxScore);
+      const payoutTotal = Math.floor(pot * 0.9);
+      const perWinner = Math.floor(payoutTotal / winners.length);
+
+      for (const entry of tierEntries) {
+        const isWinner = winners.includes(entry);
+        if (!isWinner) {
+          await supabase.from('sweepstake_entries').update({ payout_status: 'no_win' }).eq('id', entry.id);
+          continue;
+        }
+        const result = await sendPayout(entry.user_id, perWinner);
+        await supabase.from('sweepstake_entries').update({
+          payout_status: result.status, payout_amount_pence: perWinner, stripe_transfer_id: result.transferId
+        }).eq('id', entry.id);
+        console.log(`🏆 Global sweepstake (£${tier/100} tier) winner ${entry.user_id}: £${(perWinner/100).toFixed(2)} — ${result.status}`);
+      }
+    }
+
+    // ---- PRIVATE SWEEPSTAKES: grouped by sweepstake_id ----
+    const { data: privateSweeps } = await supabase.from('private_sweepstakes')
+      .select('id,total_pot_pence').eq('tournament_name', completedTournamentName).eq('status', 'open');
+
+    for (const sweep of (privateSweeps || [])) {
+      const { data: pEntries } = await supabase.from('private_sweepstake_entries')
+        .select('id,user_id').eq('sweepstake_id', sweep.id).eq('payment_status', 'paid');
+      if (!pEntries?.length) continue;
+
+      const maxScore = Math.max(...pEntries.map(e => weekTotalByUser[e.user_id] || 0));
+      const winners = pEntries.filter(e => (weekTotalByUser[e.user_id] || 0) === maxScore);
+      const payoutTotal = Math.floor((sweep.total_pot_pence || 0) * 0.9);
+      const perWinner = Math.floor(payoutTotal / winners.length);
+
+      for (const entry of pEntries) {
+        const isWinner = winners.includes(entry);
+        if (!isWinner) {
+          await supabase.from('private_sweepstake_entries').update({ payout_status: 'no_win' }).eq('id', entry.id);
+          continue;
+        }
+        const result = await sendPayout(entry.user_id, perWinner);
+        await supabase.from('private_sweepstake_entries').update({
+          payout_status: result.status, payout_amount_pence: perWinner, stripe_transfer_id: result.transferId
+        }).eq('id', entry.id);
+        console.log(`🏆 Private sweepstake ${sweep.id} winner ${entry.user_id}: £${(perWinner/100).toFixed(2)} — ${result.status}`);
+      }
+      await supabase.from('private_sweepstakes').update({ status: 'completed' }).eq('id', sweep.id);
+    }
+  } catch(e) {
+    console.error('payoutSweepstakeWinners error:', e.message);
+  }
+}
+
 async function archiveGameweekResults(completedTournamentName) {
   try {
     const { data: rankings, error } = await supabase
@@ -389,6 +519,7 @@ async function writeScores(players) {
     if (oldTournament && oldTournament !== newTournament) {
       console.log(`🔄 New ${tour} tournament: ${newTournament} (was ${oldTournament}) — clearing old ${tour} data`);
       await archiveGameweekResults(oldTournament);
+      await payoutSweepstakeWinners(oldTournament);
       // Pricing and transfer-banking both need the completed tournament's
       // final results — they MUST run before the delete below, not after.
       // (This was previously ordered delete-then-price, which meant
@@ -952,6 +1083,22 @@ app.post('/api/sweepstake/checkout', async (req, res) => {
     const { stakePence, tournamentName } = req.body;
     if (!stakePence || !tournamentName) return res.status(400).json({ error: 'Missing stakePence or tournamentName' });
 
+    // Enforce the entry deadline server-side. This was previously
+    // unchecked entirely — anyone could pay to "enter" a sweepstake
+    // after the tournament had already finished (or was well underway
+    // and the leaderboard already known), guaranteeing themselves a
+    // win with zero real risk. The rulebook has always claimed entries
+    // close one hour before Thursday's first tee time; this makes that
+    // actually true, reusing the same lock timestamp already computed
+    // for transfers rather than inventing a separate one.
+    const { data: tInfo } = await supabase.from('tournament_info')
+      .select('transfer_lock_at,tournament_name').eq('id', 1).single();
+    if (tInfo && tInfo.tournament_name === tournamentName && tInfo.transfer_lock_at) {
+      if (new Date() >= new Date(tInfo.transfer_lock_at)) {
+        return res.status(403).json({ error: 'Entries for this week\'s sweepstake have closed.' });
+      }
+    }
+
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['card'],
@@ -1001,6 +1148,17 @@ app.post('/api/private-sweepstake/create', async (req, res) => {
     }
     if (stakeAmountPence > 1000000) {
       return res.status(400).json({ error: 'Maximum stake is £10,000' });
+    }
+
+    // Don't allow creating a private sweepstake for a tournament that's
+    // already locked — same gap as the global sweepstake and the join
+    // endpoint above.
+    const { data: tInfoCreate } = await supabase.from('tournament_info')
+      .select('transfer_lock_at,tournament_name').eq('id', 1).single();
+    if (tInfoCreate && tInfoCreate.tournament_name === tournamentName && tInfoCreate.transfer_lock_at) {
+      if (new Date() >= new Date(tInfoCreate.transfer_lock_at)) {
+        return res.status(403).json({ error: 'This week\'s entries have closed — create one for the next gameweek instead.' });
+      }
     }
 
     // Generate a unique 6-char invite code
@@ -1118,6 +1276,19 @@ app.post('/api/private-sweepstake/checkout', async (req, res) => {
     if (!sweep) return res.status(404).json({ error: 'Sweepstake not found' });
     if (sweep.status !== 'open') return res.status(400).json({ error: 'Sweepstake is no longer open' });
 
+    // Same missing deadline check as the global sweepstake — this
+    // relied on sweep.status flipping away from 'open' once the
+    // tournament locked, but nothing in the codebase actually does
+    // that transition, so it never took effect. Checking directly
+    // against the real tee-time-based lock instead.
+    const { data: tInfo } = await supabase.from('tournament_info')
+      .select('transfer_lock_at,tournament_name').eq('id', 1).single();
+    if (tInfo && tInfo.tournament_name === sweep.tournament_name && tInfo.transfer_lock_at) {
+      if (new Date() >= new Date(tInfo.transfer_lock_at)) {
+        return res.status(403).json({ error: 'Entries for this sweepstake have closed.' });
+      }
+    }
+
     // Check not already entered
     const { data: existing } = await supabase.from('private_sweepstake_entries')
       .select('id').eq('sweepstake_id', sweepstakeId).eq('user_id', user.id).maybeSingle();
@@ -1161,6 +1332,14 @@ app.post('/api/stripe/webhook', async (req, res) => {
   } catch(e) {
     console.log('Webhook signature error:', e.message);
     return res.status(400).send(`Webhook Error: ${e.message}`);
+  }
+
+  if (event.type === 'account.updated') {
+    const account = event.data.object;
+    const onboarded = !!(account.charges_enabled && account.payouts_enabled);
+    supabase.from('payout_details').update({ connect_onboarded: onboarded })
+      .eq('stripe_connect_account_id', account.id)
+      .then(() => console.log(`🔗 Connect account ${account.id} onboarded=${onboarded}`));
   }
 
   if (event.type === 'checkout.session.completed') {
@@ -1216,6 +1395,85 @@ app.post('/api/payout-details', async (req, res) => {
     });
     res.json({ success: true });
   } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ════════════════════════════════════════════════
+// STRIPE CONNECT — real automatic payouts
+// Previously there was no automatic payout system at all: entries
+// were taken via Stripe Checkout, but nothing ever determined a
+// winner or paid them — that was a fully manual process (look up the
+// winner, personally bank-transfer them, mark it paid in the admin
+// dashboard). This replaces that with genuine Stripe Connect Express
+// accounts: Stripe hosts onboarding (collecting bank details and ID
+// verification directly, so this platform never touches that data),
+// and once onboarded, paying a winner is a single transfer() call.
+// ════════════════════════════════════════════════
+
+// ---- Create/resume Connect onboarding ----
+app.post('/api/connect/onboard-link', async (req, res) => {
+  try {
+    if (!stripe) return res.status(503).json({ error: 'Payments not configured' });
+    const user = await getUserFromToken(req.headers.authorization);
+    if (!user || !user.id) return res.status(401).json({ error: 'Not authenticated' });
+
+    const { data: existing } = await supabase.from('payout_details')
+      .select('stripe_connect_account_id').eq('user_id', user.id).maybeSingle();
+
+    let accountId = existing?.stripe_connect_account_id;
+    if (!accountId) {
+      const account = await stripe.accounts.create({
+        type: 'express',
+        country: 'GB',
+        email: user.email || undefined,
+        capabilities: { transfers: { requested: true } }
+      });
+      accountId = account.id;
+      await supabase.from('payout_details').upsert({
+        user_id: user.id,
+        stripe_connect_account_id: accountId,
+        connect_onboarded: false,
+        updated_at: new Date().toISOString()
+      });
+    }
+
+    const accountLink = await stripe.accountLinks.create({
+      account: accountId,
+      refresh_url: 'https://thefieldfantasygolf.com/?connect=refresh',
+      return_url: 'https://thefieldfantasygolf.com/?connect=complete',
+      type: 'account_onboarding'
+    });
+
+    res.json({ url: accountLink.url });
+  } catch(e) {
+    console.log('connect onboard-link error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---- Check onboarding status ----
+app.get('/api/connect/status', async (req, res) => {
+  try {
+    if (!stripe) return res.status(503).json({ error: 'Payments not configured' });
+    const user = await getUserFromToken(req.headers.authorization);
+    if (!user || !user.id) return res.status(401).json({ error: 'Not authenticated' });
+
+    const { data: pd } = await supabase.from('payout_details')
+      .select('stripe_connect_account_id,connect_onboarded').eq('user_id', user.id).maybeSingle();
+
+    if (!pd?.stripe_connect_account_id) return res.json({ onboarded: false, hasAccount: false });
+
+    // Re-check with Stripe directly rather than trusting our cached flag,
+    // in case the account.updated webhook was missed for any reason.
+    const account = await stripe.accounts.retrieve(pd.stripe_connect_account_id);
+    const onboarded = !!(account.charges_enabled && account.payouts_enabled);
+    if (onboarded !== pd.connect_onboarded) {
+      await supabase.from('payout_details').update({ connect_onboarded: onboarded }).eq('user_id', user.id);
+    }
+    res.json({ onboarded, hasAccount: true });
+  } catch(e) {
+    console.log('connect status error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
